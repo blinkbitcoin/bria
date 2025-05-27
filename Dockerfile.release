@@ -3,7 +3,7 @@ FROM alpine:latest as load
 ARG VERSION
 ENV VERSION ${VERSION}
 RUN mkdir bria-home && mkdir bria && cd bria \
-  && wget https://github.com/GaloyMoney/bria/releases/download/${VERSION}/bria-x86_64-unknown-linux-musl-${VERSION}.tar.gz -O bria.tar.gz \
+  && wget https://github.com/blinkbitcoin/bria/releases/download/${VERSION}/bria-x86_64-unknown-linux-musl-${VERSION}.tar.gz -O bria.tar.gz \
   && tar --strip-components=1 -xf bria.tar.gz \
   && mv bria /usr/local/bin && cd ../ && rm -rf ./bria
 

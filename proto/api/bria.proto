@@ -4,7 +4,7 @@ import "google/protobuf/struct.proto";
 
 package services.bria.v1;
 
-option go_package = "github.com/GaloyMoney/terraform-provider-bria/client/proto/briav1";
+option go_package = "github.com/blinkbitcoin/terraform-provider-bria/client/proto/briav1";
 
 service BriaService {
   rpc CreateProfile (CreateProfileRequest) returns (CreateProfileResponse) {}
