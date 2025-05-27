@@ -1,13 +1,13 @@
 #@data/values
 ---
-git_uri: git@github.com:GaloyMoney/bria.git
+git_uri: git@github.com:blinkbitcoin/bria.git
 git_branch: main
-github_private_key: ((github.private_key))
-github_token: ((github.api_token))
-github_app_id: ((github.github_app_id))
-github_app_private_key: ((github.github_app_private_key))
+github_private_key: ((github-blinkbitcoin.private_key))
+github_token: ((github-blinkbitcoin.api_token))
+github_app_id: ((github-blinkbitcoin.github_app_id))
+github_app_private_key: ((github-blinkbitcoin.github_app_private_key))
 
-git_charts_uri: git@github.com:GaloyMoney/charts.git
+git_charts_uri: git@github.com:blinkbitcoin/charts.git
 git_charts_branch: main
 git_charts_bot_branch: bot-bump-bria-image
 
@@ -24,5 +24,5 @@ staging_inception_creds: ((staging-gcp-creds.creds_json))
 staging_ssh_private_key: ((staging-ssh.ssh_private_key))
 staging_ssh_pub_key: ((staging-ssh.ssh_public_key))
 git_version_branch: version
-gh_org: GaloyMoney
+gh_org: blinkbitcoin
 gh_repository: bria
