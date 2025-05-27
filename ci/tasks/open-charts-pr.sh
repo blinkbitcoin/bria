@@ -23,7 +23,7 @@ ${digest}
 
 Code diff contained in this image:
 
-https://github.com/GaloyMoney/${CHARTS_SUBDIR}/compare/${old_ref}...${ref}
+https://github.com/blinkbitcoin/${CHARTS_SUBDIR}/compare/${old_ref}...${ref}
 EOF
 
 export GH_TOKEN="$(ghtoken generate -b "${GH_APP_PRIVATE_KEY}" -i "${GH_APP_ID}" | jq -r '.token')"

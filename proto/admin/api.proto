@@ -1,7 +1,7 @@
 syntax = "proto3";
 package services.bria_admin.v1;
 
-option go_package = "github.com/GaloyMoney/terraform-provider-briaadmin/client/proto/adminv1";
+option go_package = "github.com/blinkbitcoin/terraform-provider-briaadmin/client/proto/adminv1";
 
 service AdminService {
   rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse) {}

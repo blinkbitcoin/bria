@@ -11,7 +11,7 @@ pushd repo
 VERSION="$(cat ../version/version)"
 
 cat <<EOF >new_change_log.md
-# [bria release v${VERSION}](https://github.com/GaloyMoney/bria/releases/tag/${VERSION})
+# [bria release v${VERSION}](https://github.com/blinkbitcoin/bria/releases/tag/${VERSION})
 
 $(cat ../artifacts/gh-release-notes.md)
 
