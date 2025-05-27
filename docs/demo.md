@@ -3,7 +3,7 @@
 ### Build from source
 * clone the bria repository
   ```
-  git clone https://github.com/GaloyMoney/bria
+  git clone https://github.com/blinkbitcoin/bria
   ```
 * go to the bria directory and run direnv
   ```
