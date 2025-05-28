@@ -1,3 +1,14 @@
+# [bria release v0.1.113](https://github.com/blinkbitcoin/bria/releases/tag/0.1.113)
+
+
+### Miscellaneous Tasks
+
+- Run sqlx-prepare (#608)
+
+### Refactor
+
+- Use es_entity framework for payout_queue entity (#606)
+
 # [bria release v0.1.112](https://github.com/GaloyMoney/bria/releases/tag/0.1.112)
 
 
