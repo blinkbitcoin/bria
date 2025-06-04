@@ -1,3 +1,10 @@
+# [bria release v0.1.114](https://github.com/blinkbitcoin/bria/releases/tag/0.1.114)
+
+
+### Features
+
+- Add batch drop (#5)
+
 # [bria release v0.1.113](https://github.com/blinkbitcoin/bria/releases/tag/0.1.113)
 
 
