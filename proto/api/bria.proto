@@ -46,6 +46,8 @@ service BriaService {
   rpc GetAccountBalanceSummary (GetAccountBalanceSummaryRequest) returns (GetAccountBalanceSummaryResponse) {}
 
   rpc SubscribeAll (SubscribeAllRequest) returns (stream BriaEvent) {}
+
+  rpc GetFeeRates(GetFeeRatesRequest) returns (GetFeeRatesResponse) {}
 }
 
 message CreateProfileRequest {
@@ -593,4 +595,12 @@ message PayoutSettled {
     BriaWalletDestination wallet = 9;
   };
   uint64 proportional_fee_sats = 8;
+}
+
+message GetFeeRatesRequest {}
+
+message GetFeeRatesResponse {
+  uint32 fastest   = 1;
+  uint32 half_hour = 2;
+  uint32 hour      = 3;
 }

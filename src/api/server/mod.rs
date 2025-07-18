@@ -588,6 +588,27 @@ impl BriaService for Bria {
         .await
     }
 
+    #[instrument(name = "bria.get_fee_rates", skip_all, err)]
+    async fn get_fee_rates(
+        &self,
+        request: tonic::Request<GetFeeRatesRequest>,
+    ) -> Result<tonic::Response<GetFeeRatesResponse>, tonic::Status> {
+        let _ = extract_tracing(&request);
+
+        let rates = self
+            .app
+            .get_fee_rates()
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Internal Error {:?}", e)))?;
+
+        let resp = GetFeeRatesResponse {
+            fastest: rates.fastest,
+            half_hour: rates.half_hour,
+            hour: rates.hour,
+        };
+        Ok(tonic::Response::new(resp))
+    }
+
     #[instrument(name = "bria.submit_payout", skip_all, fields(error, error.level, error.message), err)]
     async fn submit_payout(
         &self,

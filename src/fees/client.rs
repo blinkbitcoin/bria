@@ -6,7 +6,7 @@ use crate::primitives::TxPriority;
 
 #[derive(Clone, Debug)]
 pub struct FeesClient {
-    mempool_space: MempoolSpaceClient,
+    pub mempool_space: MempoolSpaceClient,
     blockstream: BlockstreamClient,
 }
 

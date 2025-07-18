@@ -4,4 +4,4 @@ app:
     electrum_url: localhost:50001
   fees:
     mempool_space:
-      url: http://localhost:8999
+      url: https://mempool.space

@@ -29,6 +29,12 @@ use crate::{
     xpub::*,
 };
 
+pub struct FeeRates {
+    pub fastest: u32,
+    pub half_hour: u32,
+    pub hour: u32,
+}
+
 #[allow(dead_code)]
 pub struct App {
     _runner: JobRunnerHandle,
@@ -741,6 +747,22 @@ impl App {
             destination,
             sats,
         ))
+    }
+
+    #[instrument(name = "app.get_fee_rates", skip_all, err)]
+    pub async fn get_fee_rates(&self) -> Result<FeeRates, ApplicationError> {
+        let rec = self
+            .fees_client
+            .mempool_space
+            .fee_rates()
+            .await
+            .map_err(ApplicationError::from)?;
+
+        Ok(FeeRates {
+            fastest: rec.fastest_fee as u32,
+            half_hour: rec.half_hour_fee as u32,
+            hour: rec.hour_fee as u32,
+        })
     }
 
     #[instrument(name = "app.submit_payout_to_address", skip(self), err)]
