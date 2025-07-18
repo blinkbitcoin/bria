@@ -353,6 +353,7 @@ message EstimatePayoutFeeRequest {
 
 message EstimatePayoutFeeResponse {
   uint64 satoshis = 1;
+  uint64 fee_rate  = 2;
 }
 
 message SubmitPayoutRequest {
