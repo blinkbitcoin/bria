@@ -549,7 +549,7 @@ impl BriaService for Bria {
                 satoshis,
             } = request;
 
-            let sats = match destination {
+            let (sats, fee_rate) = match destination {
                 Some(proto::estimate_payout_fee_request::Destination::OnchainAddress(address)) => {
                     self.app
                         .estimate_payout_fee_to_address(
@@ -583,6 +583,7 @@ impl BriaService for Bria {
             };
             Ok(Response::new(EstimatePayoutFeeResponse {
                 satoshis: u64::from(sats),
+                fee_rate: fee_rate.as_sat_per_vb(),
             }))
         })
         .await

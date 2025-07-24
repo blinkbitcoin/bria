@@ -1,6 +1,7 @@
 mod config;
 pub mod error;
 
+use bdk::FeeRate;
 use sqlxmq::JobRunnerHandle;
 use tracing::instrument;
 
@@ -656,7 +657,7 @@ impl App {
         queue_name: String,
         destination_wallet_name: String,
         sats: Satoshis,
-    ) -> Result<Satoshis, ApplicationError> {
+    ) -> Result<(Satoshis, FeeRate), ApplicationError> {
         let destination_wallet = self
             .wallets
             .find_by_name(profile.account_id, destination_wallet_name)
@@ -683,7 +684,7 @@ impl App {
         queue_name: String,
         destination: String,
         sats: Satoshis,
-    ) -> Result<Satoshis, ApplicationError> {
+    ) -> Result<(Satoshis, FeeRate), ApplicationError> {
         let wallet = self
             .wallets
             .find_by_name(profile.account_id, wallet_name)
@@ -721,7 +722,7 @@ impl App {
         };
 
         if let Some(fee) = psbt.proportional_fee(&wallet.id, sats) {
-            return Ok(fee);
+            return Ok((fee, fee_rate));
         }
 
         // No utxos were available to simulate the batch
@@ -730,7 +731,7 @@ impl App {
             .payouts
             .average_payout_per_batch(wallet.id, queue_id)
             .await?;
-        Ok(fees::estimate_proportional_fee(
+        let fee = fees::estimate_proportional_fee(
             avg_utxo_size,
             wallet
                 .current_keychain_wallet(&self.pool)
@@ -740,7 +741,8 @@ impl App {
             payout_size,
             destination,
             sats,
-        ))
+        );
+        Ok((fee, fee_rate))
     }
 
     #[instrument(name = "app.submit_payout_to_address", skip(self), err)]
