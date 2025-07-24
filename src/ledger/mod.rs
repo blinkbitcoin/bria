@@ -750,7 +750,7 @@ impl Ledger {
             .id(account_id)
             .name(&wallet_name)
             .code(wallet_code)
-            .description(format!("Account for wallet '{}'", wallet_id_prefix))
+            .description(format!("Account for wallet '{wallet_id_prefix}'"))
             .normal_balance_type(balance_type)
             .build()
             .expect("Couldn't build NewLedgerAccount");

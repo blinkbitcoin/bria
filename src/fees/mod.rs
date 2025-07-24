@@ -132,7 +132,7 @@ mod tests {
         // has 1 input and 2 outputs
         let bytes = hex::decode("01000000000101e4b803c2d1bbc799050ef212b6749b925e35e9530839c833aca4964c4278a3e4010000000080e3ffff02b738010000000000160014c3dc650ba285d0b7bcb0486ec7454e434146f6e093f6c20000000000160014c789c7a2800fdad9a330373a3b58319f4b7b0f8802483045022100a9dbe84dd0ce75aeac6bc9151e3ecea0d9be70ce93645d179bc61ca96bfd6eaa02200fa8facea14e00d207b830a0b0b3bb106a6735a4a8e0702232aa22c8ffa6a4e101210226f3fc10d64822765964345fd6bc71d48782d2c44bcef826089d0e4d709532ac00000000").unwrap();
         let tx: Transaction = bitcoin::consensus::encode::deserialize(&bytes).unwrap();
-        assert_eq!(tx.weight(), Weight::from_wu(562 as u64));
+        assert_eq!(tx.weight(), Weight::from_wu(562_u64));
 
         let fee_rate = bitcoin::FeeRate::from_sat_per_vb(1000.);
 

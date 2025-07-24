@@ -34,8 +34,8 @@ impl ScriptPubkeys {
                 builder.push_bind(keychain);
                 builder.push_bind(*path as i32);
                 builder.push_bind(script.as_bytes());
-                builder.push_bind(format!("{:02x}", script));
-                builder.push_bind(format!("{:?}", script));
+                builder.push_bind(format!("{script:02x}"));
+                builder.push_bind(format!("{script:?}"));
             });
             query_builder.push("ON CONFLICT DO NOTHING");
 

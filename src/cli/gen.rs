@@ -16,7 +16,7 @@ pub fn gen_descriptor_keys(network: Network) -> anyhow::Result<()> {
     let root_key: GeneratedKey<bip32::ExtendedPrivKey, Segwitv0> =
         bip32::ExtendedPrivKey::generate(())?;
     let root_key = root_key.into_extended_key()?.into_xprv(network).unwrap();
-    println!("ROOT KEY\n{}", root_key);
+    println!("ROOT KEY\n{root_key}");
     let path = bip32::DerivationPath::from_str("m/84'/0'/0'")?;
     let secp = Secp256k1::new();
     let external_key: DescriptorKey<Segwitv0> = root_key
@@ -47,7 +47,7 @@ pub fn gen_descriptor_keys(network: Network) -> anyhow::Result<()> {
         "timestamp": "now",
     }
     ]);
-    println!("BITCOIND\n{}", bitcoind_json);
+    println!("BITCOIND\n{bitcoind_json}");
     println!("EXTERNAL\n{}", external_descriptor.0);
     println!("INTERNAL\n{}", internal_descriptor.0);
     let wallet = bdk::Wallet::new(
@@ -67,7 +67,7 @@ pub fn gen_signer_encryption_key() -> anyhow::Result<()> {
     let key = ChaCha20Poly1305::generate_key(&mut OsRng);
     let key_bytes = key.as_slice();
     let hex_string = hex::encode(key_bytes);
-    println!("{}", hex_string);
+    println!("{hex_string}");
     Ok(())
 }
 
@@ -104,7 +104,7 @@ pub fn rotate_signer_encryption_key(old_key: String) -> anyhow::Result<()> {
         .expect("should always encrypt");
     let hex_encrypted_old_key = hex::encode(encrypted_old_key);
     let hex_nonce = hex::encode(nonce.as_slice());
-    println!("New encryption key: {}", hex_new_encryption_key);
+    println!("New encryption key: {hex_new_encryption_key}");
 
     let app_output = AppOutput {
         app: App {
@@ -115,6 +115,6 @@ pub fn rotate_signer_encryption_key(old_key: String) -> anyhow::Result<()> {
         },
     };
     let yaml = serde_yaml::to_string(&app_output)?;
-    println!("{}", yaml);
+    println!("{yaml}");
     Ok(())
 }

@@ -45,6 +45,6 @@ pub fn read_and_parse_addresses(file_path: impl AsRef<Path>) -> anyhow::Result<(
     };
 
     let yaml = serde_yaml::to_string(&app_output).unwrap();
-    println!("{}", yaml);
+    println!("{yaml}");
     Ok(())
 }
