@@ -384,3 +384,22 @@ teardown_file() {
   batch=$(bria_cmd get-batch -b "${batch_id}")
   [[ $(echo ${batch} | jq -r '.id') == "${batch_id}" && $(echo ${batch} | jq -r '.cancelled') == "false" ]] || exit 1
 }
+
+@test "payout: Estimate payout fee returns positive fee and fee_rate" {
+  bria_address=$(bria_cmd new-address -w default | jq -r '.address')
+  [[ -n "${bria_address}" ]] || exit 1
+
+  response=$(bria_cmd estimate-payout-fee \
+    --wallet default \
+    --queue-name high \
+    --destination "${bria_address}" \
+    --amount 10000)
+
+  estimated_fee=$(echo "${response}" | jq -r '.sats')
+  fee_rate=$(echo "${response}" | jq -r '.feeRate')
+
+  [[ "${estimated_fee}" =~ ^[0-9]+$ ]] || exit 1
+  [[ "${estimated_fee}" -gt 0 ]] || exit 1
+  [[ "${fee_rate}" != "null" ]] || exit 1
+  [[ $(echo "${fee_rate} > 0" | bc -l) -eq 1 ]] || exit 1
+}
