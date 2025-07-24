@@ -25,10 +25,8 @@ impl FeesClient {
         } else {
             self.blockstream.fee_rate(priority).await?
         };
-        tracing::Span::current().record(
-            "fee_rate",
-            tracing::field::display(format!("{:?}", fee_rate)),
-        );
+        tracing::Span::current()
+            .record("fee_rate", tracing::field::display(format!("{fee_rate:?}")));
         Ok(fee_rate)
     }
 }
