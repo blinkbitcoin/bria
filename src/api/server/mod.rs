@@ -583,7 +583,7 @@ impl BriaService for Bria {
             };
             Ok(Response::new(EstimatePayoutFeeResponse {
                 satoshis: u64::from(sats),
-                fee_rate: fee_rate.as_sat_per_vb().round() as u64,
+                fee_rate: fee_rate.as_sat_per_vb(),
             }))
         })
         .await
