@@ -395,11 +395,12 @@ teardown_file() {
     --destination "${bria_address}" \
     --amount 10000)
 
-  estimated_fee=$(echo "${response}" | jq -r '.sats')
+  estimated_fee=$(echo "${response}" | jq -r '.satoshis')
   fee_rate=$(echo "${response}" | jq -r '.feeRate')
 
   [[ "${estimated_fee}" =~ ^[0-9]+$ ]] || exit 1
   [[ "${estimated_fee}" -gt 0 ]] || exit 1
-  [[ "${fee_rate}" != "null" ]] || exit 1
-  [[ $(echo "${fee_rate} > 0" | bc -l) -eq 1 ]] || exit 1
+
+  [[ "${fee_rate}" =~ ^[0-9]+$ ]] || exit 1
+  [[ "${fee_rate}" -gt 0 ]] || exit 1
 }
