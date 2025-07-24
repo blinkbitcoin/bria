@@ -1,9 +1,9 @@
 mod config;
 pub mod error;
 
+use bdk::FeeRate;
 use sqlxmq::JobRunnerHandle;
 use tracing::instrument;
-use bdk::FeeRate;
 
 use std::collections::HashMap;
 
