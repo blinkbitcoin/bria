@@ -53,18 +53,18 @@ impl KeychainConfig {
 
     pub fn external_descriptor(&self) -> ExtendedDescriptor {
         match self {
-            Self::Wpkh { xpub } => format!("wpkh({}/0/*)", xpub)
+            Self::Wpkh { xpub } => format!("wpkh({xpub}/0/*)")
                 .parse()
                 .expect("Couldn't create internal wpkh descriptor"),
             Self::Descriptors { external, .. } => external.clone(),
             Self::SortedMultisig { xpub, threshold } => {
                 let keys = xpub
                     .iter()
-                    .map(|xpub| format!("{}/0/*", xpub))
+                    .map(|xpub| format!("{xpub}/0/*"))
                     .collect::<Vec<_>>();
                 let keys = keys.join(",");
-                println!("{}", keys);
-                format!("wsh(sortedmulti({},{}))", threshold, keys)
+                println!("{keys}");
+                format!("wsh(sortedmulti({threshold},{keys}))")
                     .parse()
                     .expect("Couldn't create external sorted multisig descriptor")
             }
@@ -73,17 +73,17 @@ impl KeychainConfig {
 
     pub fn internal_descriptor(&self) -> ExtendedDescriptor {
         match self {
-            Self::Wpkh { xpub } => format!("wpkh({}/1/*)", xpub)
+            Self::Wpkh { xpub } => format!("wpkh({xpub}/1/*)")
                 .parse()
                 .expect("Couldn't create internal wpkh descriptor"),
             Self::Descriptors { internal, .. } => internal.clone(),
             Self::SortedMultisig { xpub, threshold } => {
                 let keys = xpub
                     .iter()
-                    .map(|xpub| format!("{}/1/*", xpub))
+                    .map(|xpub| format!("{xpub}/1/*"))
                     .collect::<Vec<_>>();
                 let keys = keys.join(",");
-                format!("wsh(sortedmulti({},{}))", threshold, keys)
+                format!("wsh(sortedmulti({threshold},{keys}))")
                     .parse()
                     .expect("Couldn't create internal sorted multisig descriptor")
             }
