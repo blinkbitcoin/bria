@@ -1,3 +1,14 @@
+# [bria release v0.1.115](https://github.com/blinkbitcoin/bria/releases/tag/0.1.115)
+
+
+### Features
+
+- Add fee rate to estimate-payout-fee (#7)
+
+### Miscellaneous Tasks
+
+- Flake update (#8)
+
 # [bria release v0.1.114](https://github.com/blinkbitcoin/bria/releases/tag/0.1.114)
 
 
