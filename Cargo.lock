@@ -3532,7 +3532,7 @@ dependencies = [
 [[package]]
 name = "sqlx-ledger"
 version = "0.11.8-dev"
-source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=fix-pg-notify-payload-limit#6b314dff3dde7cfe7da755f808f98ab8eb902822"
+source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=chore-update-rust-version-20251117#81f32d56f1eec15ca2b32beadbe32c1033bc428c"
 dependencies = [
  "cached",
  "chrono",
@@ -3554,7 +3554,7 @@ dependencies = [
 [[package]]
 name = "sqlx-ledger-cel-interpreter"
 version = "0.11.8-dev"
-source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=fix-pg-notify-payload-limit#6b314dff3dde7cfe7da755f808f98ab8eb902822"
+source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=chore-update-rust-version-20251117#81f32d56f1eec15ca2b32beadbe32c1033bc428c"
 dependencies = [
  "chrono",
  "rust_decimal",
@@ -3568,7 +3568,7 @@ dependencies = [
 [[package]]
 name = "sqlx-ledger-cel-parser"
 version = "0.11.8-dev"
-source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=fix-pg-notify-payload-limit#6b314dff3dde7cfe7da755f808f98ab8eb902822"
+source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=chore-update-rust-version-20251117#81f32d56f1eec15ca2b32beadbe32c1033bc428c"
 dependencies = [
  "lalrpop",
  "lalrpop-util",
