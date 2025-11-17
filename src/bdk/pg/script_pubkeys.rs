@@ -93,6 +93,7 @@ impl ScriptPubkeys {
         Ok(ret)
     }
 
+    #[allow(dead_code)]
     #[instrument(name = "bdk.script_pubkeys.find_path", skip_all)]
     pub async fn find_path(
         &self,

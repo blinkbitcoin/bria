@@ -86,6 +86,7 @@ impl Transactions {
         }))
     }
 
+    #[allow(dead_code)]
     #[instrument(name = "bdk.transactions.find_by_id", skip_all)]
     pub async fn find_by_id(&self, tx_id: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
         let tx = sqlx::query!(
