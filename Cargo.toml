@@ -8,7 +8,7 @@ edition = "2021"
 fail-on-warnings = []
 
 [dependencies]
-sqlx-ledger = { version = "0.11.5", features = ["otel"] }
+sqlx-ledger = { git = "https://github.com/blinkbitcoin/sqlx-ledger", branch = "fix-pg-notify-payload-limit", features = ["otel"] }
 
 anyhow = "1.0.82"
 bitcoincore-rpc = "0.17.0"

@@ -2515,7 +2515,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9552f850d5f0964a4e4d0bf306459ac29323ddfbae05e35a7c0d35cb0803cc5"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.89",
@@ -3465,9 +3465,8 @@ dependencies = [
 
 [[package]]
 name = "sqlx-ledger"
-version = "0.11.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9369e218d700d6dd64173d9c39e9ef1ae9113d509a48d1966f4cf800f656697"
+version = "0.11.8-dev"
+source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=fix-pg-notify-payload-limit#6b314dff3dde7cfe7da755f808f98ab8eb902822"
 dependencies = [
  "cached",
  "chrono",
@@ -3488,9 +3487,8 @@ dependencies = [
 
 [[package]]
 name = "sqlx-ledger-cel-interpreter"
-version = "0.11.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fddd96dc84b0ae274d2bad03f5bc1be47c0270c91ba4a52c5b8bf8402363bce"
+version = "0.11.8-dev"
+source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=fix-pg-notify-payload-limit#6b314dff3dde7cfe7da755f808f98ab8eb902822"
 dependencies = [
  "chrono",
  "rust_decimal",
@@ -3503,9 +3501,8 @@ dependencies = [
 
 [[package]]
 name = "sqlx-ledger-cel-parser"
-version = "0.11.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a325bbfe2b3a3371580a3c1a38eaf817b8cfa07006b0f37bc34556e51944885b"
+version = "0.11.8-dev"
+source = "git+https://github.com/blinkbitcoin/sqlx-ledger?branch=fix-pg-notify-payload-limit#6b314dff3dde7cfe7da755f808f98ab8eb902822"
 dependencies = [
  "lalrpop",
  "lalrpop-util",
