@@ -1,7 +1,7 @@
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{propagation::TextMapPropagator, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::{Config, Sampler, TracerProvider};
+use opentelemetry_sdk::trace::{Sampler, TracerProvider};
 use opentelemetry_sdk::{propagation::TraceContextPropagator, Resource};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -40,16 +40,13 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
         .with_endpoint(tracing_endpoint)
         .build()?;
 
-    let provider_config = Config::default()
+    let provider = TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
         .with_sampler(Sampler::AlwaysOn)
         .with_resource(Resource::new(vec![KeyValue::new(
             "service.name",
             service_name.clone(),
-        )]));
-
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_config(provider_config)
+        )]))
         .build();
     let tracer = provider.tracer(service_name);
 
