@@ -1,3 +1,10 @@
+# [bria release v0.1.116](https://github.com/blinkbitcoin/bria/releases/tag/0.1.116)
+
+
+### Bug Fixes
+
+- Handle pg_notify payload overflow for high-input transactions (#10)
+
 # [bria release v0.1.115](https://github.com/blinkbitcoin/bria/releases/tag/0.1.115)
 
 
