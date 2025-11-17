@@ -8,7 +8,7 @@ edition = "2021"
 fail-on-warnings = []
 
 [dependencies]
-sqlx-ledger = { git = "https://github.com/blinkbitcoin/sqlx-ledger", branch = "chore-update-rust-version-20251117", features = ["otel"] }
+sqlx-ledger = { version = "0.11.8", features = ["otel"] }
 
 anyhow = "1.0.82"
 bitcoincore-rpc = "0.17.0"
