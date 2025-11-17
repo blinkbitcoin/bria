@@ -404,3 +404,170 @@ teardown_file() {
   [[ "${fee_rate}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || exit 1
   [[ "$(echo "${fee_rate} > 0" | bc -l)" -eq 1 ]] || exit 1
 }
+
+@test "payout: Can sync transaction with 120+ inputs without payload error" {
+  bitcoin_cli -generate 6
+
+  bitcoind_signer_address=$(bitcoin_signer_cli getnewaddress)
+  if [ -z "$bitcoind_signer_address" ]; then
+    echo "Failed to get a new address"
+    exit 1
+  fi
+
+  echo "Creating 130 UTXOs..."
+  for i in {1..130}; do
+    bitcoin_cli -regtest sendtoaddress ${bitcoind_signer_address} 0.01
+  done
+
+  for i in {1..60}; do
+    n_utxos=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos | length')
+    echo "Detected UTXOs: ${n_utxos}"
+    [[ "${n_utxos}" -ge "130" ]] && break
+    sleep 1
+  done
+  n_utxos=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos | length')
+  [[ "${n_utxos}" -ge "130" ]] || exit 1
+
+  bitcoin_cli -generate 6
+
+  for i in {1..60}; do
+    cache_wallet_balance
+    settled=$(cached_current_settled)
+    echo "Settled balance: ${settled}"
+    [[ "${settled}" -ge "130000000" ]] && break
+    sleep 1
+  done
+  [[ $(cached_current_settled) -ge "130000000" ]] || exit 1
+
+  echo "Creating transaction with 130+ inputs..."
+  bitcoind_address=$(bitcoin_cli -regtest getnewaddress)
+  bitcoin_signer_cli -named sendall recipients="[\"${bitcoind_address}\"]" fee_rate=1
+
+  echo "Waiting for spend to be detected..."
+  for i in {1..60}; do
+    cache_wallet_balance
+    pending=$(cached_pending_outgoing)
+    echo "Pending outgoing: ${pending}"
+    [[ "${pending}" != "0" ]] && break
+    sleep 1
+  done
+
+  cache_wallet_balance
+  echo "Pending outgoing after detection: $(cached_pending_outgoing)"
+  [[ $(cached_pending_outgoing) != "0" ]] || exit 1
+  [[ $(cached_current_settled) == "0" ]] || exit 1
+
+  echo "Confirming the spending transaction..."
+  bitcoin_cli -generate 6
+
+  echo "Waiting for spend to be settled..."
+  for i in {1..60}; do
+    cache_wallet_balance
+    pending=$(cached_pending_outgoing)
+    echo "Pending outgoing: ${pending}"
+    [[ "${pending}" == "0" ]] && break
+    sleep 1
+  done
+  [[ $(cached_pending_outgoing) == "0" ]] || exit 1
+
+  cache_wallet_balance
+  settled=$(cached_current_settled)
+  echo "Final settled balance: ${settled}"
+  [[ "${settled}" == "0" ]] || exit 1
+}
+
+@test "payout: Can create payout batch with 120+ inputs without payload error" {
+  bria_cmd set-signer-config \
+    --xpub "68bfb290" bitcoind \
+    --endpoint "${BITCOIND_SIGNER_ENDPOINT}" \
+    --rpc-user "rpcuser" \
+    --rpc-password "rpcpassword"
+
+  bria_cmd create-payout-queue --name large-tx-queue --interval-trigger 5
+
+  bria_address=$(bria_cmd new-address -w default | jq -r '.address')
+  if [ -z "$bria_address" ]; then
+    echo "Failed to get a new address"
+    exit 1
+  fi
+
+  echo "Creating 130 UTXOs for payout test..."
+  for i in {1..130}; do
+    bitcoin_cli -regtest sendtoaddress ${bria_address} 0.01
+  done
+
+  for i in {1..60}; do
+    n_utxos=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos | length')
+    echo "Detected UTXOs: ${n_utxos}"
+    [[ "${n_utxos}" == "130" ]] && break
+    sleep 1
+  done
+  n_utxos=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos | length')
+  [[ "${n_utxos}" == "130" ]] || exit 1
+
+  bitcoin_cli -generate 6
+
+  for i in {1..60}; do
+    cache_wallet_balance
+    settled=$(cached_current_settled)
+    echo "Settled balance: ${settled}"
+    [[ "${settled}" == "130000000" ]] && break
+    sleep 1
+  done
+  [[ $(cached_current_settled) == "130000000" ]] || exit 1
+
+  echo "Submitting payout that will use 130 inputs..."
+  destination="bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej"
+  payout_id=$(bria_cmd submit-payout -w default --queue-name large-tx-queue --destination ${destination} --amount 125000000 | jq -r '.id')
+
+  for i in {1..30}; do
+    cache_wallet_balance
+    encumbered=$(cached_encumbered_outgoing)
+    echo "Encumbered outgoing: ${encumbered}"
+    [[ "${encumbered}" == "125000000" ]] && break
+    sleep 1
+  done
+  [[ $(cached_encumbered_outgoing) == "125000000" ]] || exit 1
+
+  echo "Waiting for batch creation and broadcast..."
+  for i in {1..60}; do
+    batch_id=$(bria_cmd get-payout --id ${payout_id} | jq -r '.payout.batchId')
+    echo "Batch ID: ${batch_id}"
+    [[ "${batch_id}" != "null" ]] && break
+    sleep 1
+  done
+  batch_id=$(bria_cmd get-payout --id ${payout_id} | jq -r '.payout.batchId')
+  [[ "${batch_id}" != "null" ]] || exit 1
+
+  echo "Waiting for spend to be detected..."
+  for i in {1..60}; do
+    cache_wallet_balance
+    pending=$(cached_pending_outgoing)
+    echo "Pending outgoing: ${pending}"
+    [[ "${pending}" != "0" ]] && break
+    sleep 1
+  done
+
+  cache_wallet_balance
+  echo "Pending outgoing after batch broadcast: $(cached_pending_outgoing)"
+  [[ $(cached_pending_outgoing) == "125000000" ]] || exit 1
+  [[ $(cached_encumbered_outgoing) == "0" ]] || exit 1
+
+  echo "Confirming the batch transaction..."
+  bitcoin_cli -generate 6
+
+  echo "Waiting for batch to be settled..."
+  for i in {1..60}; do
+    cache_wallet_balance
+    pending=$(cached_pending_outgoing)
+    echo "Pending outgoing: ${pending}"
+    [[ "${pending}" == "0" ]] && break
+    sleep 1
+  done
+  [[ $(cached_pending_outgoing) == "0" ]] || exit 1
+
+  cache_wallet_balance
+  settled=$(cached_current_settled)
+  echo "Final settled balance: ${settled}"
+  [[ "${settled}" -gt "0" && "${settled}" -le "5000000" ]] || exit 1
+}
