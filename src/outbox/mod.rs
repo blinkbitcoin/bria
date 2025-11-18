@@ -180,6 +180,7 @@ impl Outbox {
                     }
                 }
             }
+            let _ = listener.unlisten("bria_outbox_events").await;
         });
         Ok(())
     }
