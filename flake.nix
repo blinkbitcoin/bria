@@ -60,7 +60,7 @@
             ];
             shellHook = ''
               # Workaround for nixpkgs xcrun warnings on Darwin
-              # See: NixOS/nixpkgs#376958
+              # See: https://github.com/NixOS/nixpkgs/issues/376958
               unset DEVELOPER_DIR
             '';
           });
