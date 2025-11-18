@@ -3531,9 +3531,9 @@ dependencies = [
 
 [[package]]
 name = "sqlx-ledger"
-version = "0.11.7"
+version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b55749bfcf4a9619c3edda9530a431b43295494e0fb2a4bf2a37e628630ba0a"
+checksum = "8055e5304734dd410911c945466c51eaaa1709a1776a88c41ed94aa700714b83"
 dependencies = [
  "cached",
  "chrono",
