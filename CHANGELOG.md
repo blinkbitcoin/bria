@@ -1,3 +1,10 @@
+# [bria release v0.1.120](https://github.com/blinkbitcoin/bria/releases/tag/0.1.120)
+
+
+### Bug Fixes
+
+- Update journal_events to handle stream close properly (#16)
+
 # [bria release v0.1.119](https://github.com/blinkbitcoin/bria/releases/tag/0.1.119)
 
 
