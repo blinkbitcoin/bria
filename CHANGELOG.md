@@ -1,3 +1,14 @@
+# [bria release v0.1.118](https://github.com/blinkbitcoin/bria/releases/tag/0.1.118)
+
+
+### Bug Fixes
+
+- Close db connection on loop exit (#13)
+
+### Miscellaneous Tasks
+
+- Rollback sqlx-ledger to 0.11.7 (#12)
+
 # [bria release v0.1.117](https://github.com/blinkbitcoin/bria/releases/tag/0.1.117)
 
 
