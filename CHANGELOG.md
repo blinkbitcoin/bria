@@ -1,3 +1,10 @@
+# [bria release v0.1.121](https://github.com/blinkbitcoin/bria/releases/tag/0.1.121)
+
+
+### Miscellaneous Tasks
+
+- Update sqlx-ledger to 0.11.9 (#19)
+
 # [bria release v0.1.120](https://github.com/blinkbitcoin/bria/releases/tag/0.1.120)
 
 
