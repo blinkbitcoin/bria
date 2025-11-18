@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::time::{timeout, Duration};
 use tracing::instrument;
 
 use super::error::JobError;
@@ -27,10 +28,29 @@ pub async fn execute(
             outbox.last_ledger_event_id(data.account_id).await?,
         )
         .await?;
-    while let Some(event) = stream.next().await {
-        outbox
-            .handle_journal_event(event?, tracing::Span::current())
-            .await?;
+
+    loop {
+        let result = timeout(Duration::from_secs(5), stream.next()).await;
+
+        match result {
+            Err(_elapsed) => {
+                tracing::warn!("Stream timed out - closing connection");
+                break;
+            }
+
+            Ok(stream_item) => match stream_item {
+                None => break,
+                Some(Ok(event)) => {
+                    outbox
+                        .handle_journal_event(event, tracing::Span::current())
+                        .await?;
+                }
+                Some(Err(ledger_error)) => {
+                    tracing::error!("Journal events stream error: {:?}", ledger_error);
+                    return Err(JobError::from(ledger_error));
+                }
+            },
+        }
     }
     Ok(data)
 }
