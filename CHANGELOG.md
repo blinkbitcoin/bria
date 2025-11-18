@@ -1,3 +1,10 @@
+# [bria release v0.1.119](https://github.com/blinkbitcoin/bria/releases/tag/0.1.119)
+
+
+### Miscellaneous Tasks
+
+- Set fixed version of sqlx ledger (#15)
+
 # [bria release v0.1.118](https://github.com/blinkbitcoin/bria/releases/tag/0.1.118)
 
 
