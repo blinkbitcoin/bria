@@ -2,7 +2,7 @@
   description = "Bria";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -32,9 +32,6 @@
         [
           rustToolchain
           protobuf
-        ]
-        ++ lib.optionals pkgs.stdenv.isDarwin [
-          darwin.apple_sdk.frameworks.SystemConfiguration
         ];
       devEnvVars = rec {
         PGDATABASE = "pg";
@@ -61,6 +58,11 @@
               bats
               jq
             ];
+            shellHook = ''
+              # Workaround for nixpkgs xcrun warnings on Darwin
+              # See: https://github.com/NixOS/nixpkgs/issues/376958
+              unset DEVELOPER_DIR
+            '';
           });
 
         formatter = alejandra;
