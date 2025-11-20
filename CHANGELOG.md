@@ -1,3 +1,10 @@
+# [bria release v0.1.123](https://github.com/blinkbitcoin/bria/releases/tag/0.1.123)
+
+
+### Bug Fixes
+
+- Pin sqlx version to =0.8.2 (#21)
+
 # [bria release v0.1.122](https://github.com/blinkbitcoin/bria/releases/tag/0.1.122)
 
 
