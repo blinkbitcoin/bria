@@ -73,11 +73,11 @@ services:
     volumes:
       - ./dev/otel-agent-config.yaml:/etc/otel-agent-config.yaml
   bitcoind:
-    image: lncm/bitcoind:v24.0.1
+    image: lnliz/bitcoind:v28.3
     volumes:
       - ${HOST_PROJECT_PATH:-.}/dev/bitcoind/bitcoin.conf:/data/.bitcoin/bitcoin.conf
   bitcoind-signer:
-    image: lncm/bitcoind:v24.0.1
+    image: lnliz/bitcoind:v28.3
     volumes:
       - ${HOST_PROJECT_PATH:-.}/dev/bitcoind/bitcoin.conf:/data/.bitcoin/bitcoin.conf
     depends_on: [ bitcoind ]
