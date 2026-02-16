@@ -113,10 +113,8 @@ impl NewProfile {
             },
             ProfileEvent::NameUpdated { name: self.name },
         ]);
-        if self.spending_policy.is_some() {
-            events.push(ProfileEvent::SpendingPolicyUpdated {
-                spending_policy: self.spending_policy.unwrap(),
-            });
+        if let Some(spending_policy) = self.spending_policy {
+            events.push(ProfileEvent::SpendingPolicyUpdated { spending_policy });
         }
         events
     }
