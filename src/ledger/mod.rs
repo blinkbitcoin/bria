@@ -73,21 +73,18 @@ impl Ledger {
         journal_id: JournalId,
         last_ledger_id: Option<SqlxLedgerEventId>,
     ) -> Result<impl Stream<Item = Result<JournalEvent, LedgerError>>, LedgerError> {
-        let subscriber = self
-            .inner
-            .events(EventSubscriberOpts {
-                buffer: 100,
-                close_on_lag: true,
-                after_id: Some(last_ledger_id.unwrap_or(SqlxLedgerEventId::BEGIN)),
-            })
-            .await?;
-
-        let journal_stream = subscriber.journal(journal_id).await?;
-        let stream = BroadcastStream::new(journal_stream);
-
-        let stream = stream.filter_map(move |event| {
-            // Keep subscriber alive by moving it into the closure
-            let _subscriber = &subscriber;
+        let stream = BroadcastStream::new(
+            self.inner
+                .events(EventSubscriberOpts {
+                    buffer: 100,
+                    close_on_lag: true,
+                    after_id: Some(last_ledger_id.unwrap_or(SqlxLedgerEventId::BEGIN)),
+                })
+                .await?
+                .journal(journal_id)
+                .await?,
+        );
+        Ok(stream.filter_map(|event| {
             match event
                 .map_err(LedgerError::from)
                 .and_then(MaybeIgnored::try_from)
@@ -96,9 +93,7 @@ impl Ledger {
                 Ok(MaybeIgnored::Event(e)) => Some(Ok(e)),
                 Err(e) => Some(Err(e)),
             }
-        });
-
-        Ok(stream)
+        }))
     }
 
     #[instrument(name = "ledger.utxo_detected", skip(self, tx))]
