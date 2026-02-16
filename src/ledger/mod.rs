@@ -79,6 +79,7 @@ impl Ledger {
                     buffer: 100,
                     close_on_lag: true,
                     after_id: Some(last_ledger_id.unwrap_or(SqlxLedgerEventId::BEGIN)),
+                    batch_size: 500,
                 })
                 .await?
                 .journal(journal_id)
