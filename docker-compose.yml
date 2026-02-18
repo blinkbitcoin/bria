@@ -46,6 +46,7 @@ services:
       - LND_HOST=lnd
       - ELECTRUM_HOST=fulcrum
       - CARGO_TARGET_DIR=/usr/local/cargo-target
+      - DOCKER_API_VERSION=${DOCKER_API_VERSION:-1.43}
   integration-tests:
     image: us.gcr.io/galoy-org/rust-concourse
     depends_on:
