@@ -102,13 +102,13 @@ bitcoind_init() {
   bitcoin_cli createwallet "default" || true
   bitcoin_cli generatetoaddress 200 "$(bitcoin_cli getnewaddress)"
 
-  if [[ "${wallet}" == "default" ]]; then 
+  if [[ "${wallet}" == "default" ]]; then
     bitcoin_signer_cli createwallet "default" || true
     bitcoin_signer_cli -rpcwallet=default importdescriptors "$(cat ${REPO_ROOT}/tests/e2e/bitcoind_signer_descriptors.json)"
   elif [[ "${wallet}" == "multisig" ]]; then
-    bitcoin_signer_cli createwallet "multisig" || true 
+    bitcoin_signer_cli createwallet "multisig" || true
     bitcoin_signer_cli -rpcwallet=multisig importdescriptors "$(cat ${REPO_ROOT}/tests/e2e/bitcoind_multisig_signer_descriptors.json)"
-    bitcoin_signer_cli createwallet "multisig2" || true 
+    bitcoin_signer_cli createwallet "multisig2" || true
     bitcoin_signer_cli -rpcwallet=multisig2 importdescriptors "$(cat ${REPO_ROOT}/tests/e2e/bitcoind_multisig2_signer_descriptors.json)"
   fi
 }
@@ -133,7 +133,7 @@ stop_daemon() {
 
 bria_init() {
   local wallet_type="${1:-default}"
-  
+
   if [[ "${BRIA_CONFIG}" == "docker" ]]; then
     retry_cmd="retry 10 1"
   else
@@ -143,14 +143,14 @@ bria_init() {
   $retry_cmd bria_cmd admin bootstrap
 
   bria_cmd admin create-account -n default
-  
+
   if [[ "${wallet_type}" == "default" ]]; then
     $retry_cmd bria_cmd create-wallet -n default descriptors -d "wpkh([6f2fa1b2/84'/0'/0']tpubDDDDGYiFda8HfJRc2AHFJDxVzzEtBPrKsbh35EaW2UGd5qfzrF2G87ewAgeeRyHEz4iB3kvhAYW1sH6dpLepTkFUzAktumBN8AXeXWE9nd1/0/*)#l6n08zmr" \
       -c "wpkh([6f2fa1b2/84'/0'/0']tpubDDDDGYiFda8HfJRc2AHFJDxVzzEtBPrKsbh35EaW2UGd5qfzrF2G87ewAgeeRyHEz4iB3kvhAYW1sH6dpLepTkFUzAktumBN8AXeXWE9nd1/1/*)#wwkw6htm"
   elif [[ "${wallet_type}" == "multisig" ]]; then
     local key1="tpubDEaDfeS1EXpqLVASNCW7qAHW1TFPBpk2Z39gUXjFnsfctomZ7N8iDpy6RuGwqdXAAZ5sr5kQZrxyuEn15tqPJjM4mcPSuXzV27AWRD3p9Q4"
     local key2="tpubDEPCxBfMFRNdfJaUeoTmepLJ6ZQmeTiU1Sko2sdx1R3tmPpZemRUjdAHqtmLfaVrBg1NBx2Yx3cVrsZ2FTyBuhiH9mPSL5ozkaTh1iZUTZx"
-    
+
     $retry_cmd bria_cmd import-xpub -x "${key1}" -n key1 -d m/48h/1h/0h/2h
     bria_cmd import-xpub -x "${key2}" -n key2 -d m/48h/1h/0h/2h
     bria_cmd create-wallet -n multisig sorted-multisig -x key1 key2 -t 2
@@ -162,12 +162,21 @@ bria_init() {
 bria_lnd_init() {
   retry 10 1 bria_cmd admin bootstrap
   bria_cmd admin create-account -n default
-  retry 10 1 bria_cmd import-xpub -x tpubDD4vFnWuTMEcZiaaZPgvzeGyMzWe6qHW8gALk5Md9kutDvtdDjYFwzauEFFRHgov8pAwup5jX88j5YFyiACsPf3pqn5hBjvuTLRAseaJ6b4 -n lnd_key -d m/84h/0h/0h
-  bria_cmd create-wallet -n default wpkh -x lnd_key
+
+  # Create wallet using descriptors to track both external (wpkh) and change (taproot) addresses.
+  #
+  # LND v0.19+ uses taproot (BIP86, m/86'/0'/0') for change addresses by default,
+  # Using descriptors allows bria to track both address types correctly without changing the tests.
+  #
+  # For LND versions < v0.19 (which use wpkh for both external and change), use:
+  #   retry 10 1 bria_cmd import-xpub -x <lnd_wpkh_xpub> -n lnd_key -d m/84h/0h/0h
+  #   bria_cmd create-wallet -n default wpkh -x lnd_key
+  bria_cmd create-wallet -n default descriptors \
+    -d "wpkh([6f2fa1b2/84'/0'/0']tpubDD4vFnWuTMEcZiaaZPgvzeGyMzWe6qHW8gALk5Md9kutDvtdDjYFwzauEFFRHgov8pAwup5jX88j5YFyiACsPf3pqn5hBjvuTLRAseaJ6b4/0/*)#wlmk9vyk" \
+    -c "tr([6f2fa1b2/86'/0'/0']tpubDD6sGNgWVAeKaMGF5XkfBhMAuSqjoiqUoSM7Dmf11auxu41PDg1AL4LDwTkuVEMUS2zY51zPESy1xr26cLj7BZHfwZQHd4Xf1Ym5WbvAMru/1/*)#ggr04sk2"
 
   echo "Bria Initialization Complete"
 }
-
 
 # Run the given command in the background. Useful for starting a
 # node and then moving on with commands that exercise it for the
