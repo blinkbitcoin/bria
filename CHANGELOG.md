@@ -1,3 +1,15 @@
+# [bria release v0.1.124](https://github.com/blinkbitcoin/bria/releases/tag/0.1.124)
+
+
+### Bug Fixes
+
+- Nix config on darwin (#18)
+
+### Miscellaneous Tasks
+
+- Update bitcoind and lnd images (#26)
+- Bump sqlx-ledger to 0.11.14 (#25)
+
 # [bria release v0.1.123](https://github.com/blinkbitcoin/bria/releases/tag/0.1.123)
 
 
