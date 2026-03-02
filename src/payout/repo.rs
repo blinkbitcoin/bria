@@ -157,6 +157,61 @@ impl Payouts {
         Ok(UnbatchedPayouts::new(filtered_payouts))
     }
 
+    #[instrument(name = "payouts.list_unbatched_for_estimation", skip(self))]
+    pub async fn list_unbatched_for_estimation(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        account_id: AccountId,
+        payout_queue_id: PayoutQueueId,
+    ) -> Result<UnbatchedPayouts, PayoutError> {
+        let rows = sqlx::query!(
+            r#"
+              SELECT b.*, e.sequence, e.event
+              FROM bria_payouts b
+              JOIN bria_payout_events e ON b.id = e.id
+              WHERE b.batch_id IS NULL AND b.account_id = $1 AND b.payout_queue_id = $2
+              ORDER BY b.created_at, b.id, e.sequence"#,
+            account_id as AccountId,
+            payout_queue_id as PayoutQueueId,
+        )
+        .fetch_all(&mut **tx)
+        .await?;
+        let mut wallet_payouts = Vec::new();
+        let mut entity_events = HashMap::new();
+        for row in rows {
+            let wallet_id = WalletId::from(row.wallet_id);
+            let id = WalletId::from(row.id);
+            wallet_payouts.push((id, wallet_id));
+            let events = entity_events.entry(id).or_insert_with(EntityEvents::new);
+            events.load_event(row.sequence as usize, row.event)?;
+        }
+        let mut payouts: HashMap<WalletId, Vec<UnbatchedPayout>> = HashMap::new();
+        for (id, wallet_id) in wallet_payouts {
+            if let Some(events) = entity_events.remove(&id) {
+                payouts
+                    .entry(wallet_id)
+                    .or_default()
+                    .push(UnbatchedPayout::try_from(events)?);
+            }
+        }
+        let filtered_payouts: HashMap<WalletId, Vec<UnbatchedPayout>> = payouts
+            .into_iter()
+            .map(|(wallet_id, unbatched_payouts)| {
+                let filtered_unbatched_payouts = unbatched_payouts
+                    .into_iter()
+                    .filter(|payout| {
+                        !payout
+                            .events
+                            .iter()
+                            .any(|event| matches!(event, PayoutEvent::Cancelled { .. }))
+                    })
+                    .collect();
+                (wallet_id, filtered_unbatched_payouts)
+            })
+            .collect();
+        Ok(UnbatchedPayouts::new(filtered_payouts))
+    }
+
     #[instrument(name = "payouts.list_for_wallet", skip(self))]
     pub async fn list_for_wallet(
         &self,

@@ -294,6 +294,42 @@ impl UtxoRepo {
         Ok(reservable_utxos)
     }
 
+    pub async fn find_reservable_utxos_for_estimation(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ids: impl Iterator<Item = KeychainId>,
+    ) -> Result<Vec<ReservableUtxo>, UtxoError> {
+        let uuids = ids.into_iter().map(Uuid::from).collect::<Vec<_>>();
+        let rows = sqlx::query!(
+            r#"SELECT keychain_id,
+               CASE WHEN kind = 'external' THEN true ELSE false END as income_address,
+               tx_id, vout, spending_batch_id, income_settled_ledger_tx_id
+               FROM bria_utxos
+               WHERE keychain_id = ANY($1) AND bdk_spent = false"#,
+            &uuids[..]
+        )
+        .fetch_all(&mut **tx)
+        .await?;
+
+        let reservable_utxos = rows
+            .into_iter()
+            .map(|row| ReservableUtxo {
+                keychain_id: KeychainId::from(row.keychain_id),
+                income_address: row.income_address.unwrap_or_default(),
+                outpoint: OutPoint {
+                    txid: row.tx_id.parse().unwrap(),
+                    vout: row.vout as u32,
+                },
+                spending_batch_id: row.spending_batch_id.map(BatchId::from),
+                utxo_settled_ledger_tx_id: row
+                    .income_settled_ledger_tx_id
+                    .map(LedgerTransactionId::from),
+            })
+            .collect();
+
+        Ok(reservable_utxos)
+    }
+
     pub async fn reserve_utxos_in_batch(
         &self,
         tx: &mut Transaction<'_, Postgres>,

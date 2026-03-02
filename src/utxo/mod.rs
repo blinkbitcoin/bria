@@ -16,6 +16,12 @@ pub use entity::*;
 use error::UtxoError;
 use repo::*;
 
+#[derive(Debug, Clone, Copy)]
+pub enum UtxoSelectionMode {
+    Payout,
+    Estimation,
+}
+
 #[derive(Clone)]
 pub struct Utxos {
     utxos: UtxoRepo,
@@ -211,11 +217,19 @@ impl Utxos {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ids: impl Iterator<Item = KeychainId>,
+        mode: UtxoSelectionMode,
     ) -> Result<HashMap<KeychainId, Vec<OutPoint>>, UtxoError> {
         // Here we list all Utxos that bdk might want to use and lock them (FOR UPDATE)
         // This ensures that we don't have 2 concurrent psbt constructions get in the way
         // of each other
-        let reservable_utxos = self.utxos.find_reservable_utxos(tx, ids).await?;
+        let reservable_utxos = match mode {
+            UtxoSelectionMode::Payout => self.utxos.find_reservable_utxos(tx, ids).await?,
+            UtxoSelectionMode::Estimation => {
+                self.utxos
+                    .find_reservable_utxos_for_estimation(tx, ids)
+                    .await?
+            }
+        };
 
         // We need to tell bdk which utxos not to select.
         // If we have included it in a batch OR
