@@ -34,8 +34,15 @@ const SYNC_ALL_WALLETS_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000001");
 const PROCESS_ALL_PAYOUT_QUEUES_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000002");
 const RESPAWN_ALL_OUTBOX_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000003");
 
+#[allow(dead_code)]
+pub struct JobRunners {
+    pub account_main: JobRunnerHandle,
+    pub critical: JobRunnerHandle,
+    pub maintenance: JobRunnerHandle,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn start_job_runner(
+pub async fn start_job_runners(
     pool: &sqlx::PgPool,
     outbox: Outbox,
     wallets: Wallets,
@@ -51,7 +58,126 @@ pub async fn start_job_runner(
     blockchain_cfg: BlockchainConfig,
     signer_encryption_config: SignerEncryptionConfig,
     fees_client: FeesClient,
-) -> Result<JobRunnerHandle, JobError> {
+) -> Result<JobRunners, JobError> {
+    let runner_config = config.runners.clone();
+
+    let account_main_registry = build_job_registry(
+        config.clone(),
+        blockchain_cfg.clone(),
+        outbox.clone(),
+        wallets.clone(),
+        xpubs.clone(),
+        payout_queues.clone(),
+        batches.clone(),
+        signing_sessions.clone(),
+        payouts.clone(),
+        ledger.clone(),
+        utxos.clone(),
+        addresses.clone(),
+        signer_encryption_config.clone(),
+        fees_client.clone(),
+    );
+
+    let account_main_concurrency = normalize_concurrency(runner_config.account_main);
+    let account_main = account_main_registry
+        .runner(pool)
+        .set_channel_names(&["account_main"])
+        .set_concurrency(
+            account_main_concurrency.min_concurrency,
+            account_main_concurrency.max_concurrency,
+        )
+        .set_keep_alive(false)
+        .run()
+        .await?;
+
+    let critical_registry = build_job_registry(
+        config.clone(),
+        blockchain_cfg.clone(),
+        outbox.clone(),
+        wallets.clone(),
+        xpubs.clone(),
+        payout_queues.clone(),
+        batches.clone(),
+        signing_sessions.clone(),
+        payouts.clone(),
+        ledger.clone(),
+        utxos.clone(),
+        addresses.clone(),
+        signer_encryption_config.clone(),
+        fees_client.clone(),
+    );
+
+    let critical_concurrency = normalize_concurrency(runner_config.critical);
+    let critical = critical_registry
+        .runner(pool)
+        .set_channel_names(&["wallet_accounting", "batch_signing", "batch_broadcasting"])
+        .set_concurrency(
+            critical_concurrency.min_concurrency,
+            critical_concurrency.max_concurrency,
+        )
+        .set_keep_alive(false)
+        .run()
+        .await?;
+
+    let maintenance_registry = build_job_registry(
+        config,
+        blockchain_cfg,
+        outbox,
+        wallets,
+        xpubs,
+        payout_queues,
+        batches,
+        signing_sessions,
+        payouts,
+        ledger,
+        utxos,
+        addresses,
+        signer_encryption_config,
+        fees_client,
+    );
+
+    let maintenance_concurrency = normalize_concurrency(runner_config.maintenance);
+    let maintenance = maintenance_registry
+        .runner(pool)
+        .set_channel_names(&[
+            "sync_all_wallets",
+            "process_all_payout_queues",
+            "schedule_payout_queue",
+            "respawn_all_outbox_handlers",
+            "populate_outbox",
+        ])
+        .set_concurrency(
+            maintenance_concurrency.min_concurrency,
+            maintenance_concurrency.max_concurrency,
+        )
+        .set_keep_alive(false)
+        .run()
+        .await?;
+
+    Ok(JobRunners {
+        account_main,
+        critical,
+        maintenance,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_job_registry(
+    config: JobsConfig,
+    blockchain_cfg: BlockchainConfig,
+    outbox: Outbox,
+    wallets: Wallets,
+    xpubs: XPubs,
+    payout_queues: PayoutQueues,
+    batches: Batches,
+    signing_sessions: SigningSessions,
+    payouts: Payouts,
+    ledger: Ledger,
+    utxos: Utxos,
+    addresses: Addresses,
+    signer_encryption_config: SignerEncryptionConfig,
+    fees_client: FeesClient,
+) -> JobRegistry {
     let mut registry = JobRegistry::new(&[
         sync_all_wallets,
         sync_wallet,
@@ -78,8 +204,16 @@ pub async fn start_job_runner(
     registry.set_context(addresses);
     registry.set_context(signer_encryption_config);
     registry.set_context(fees_client);
+    registry
+}
 
-    Ok(registry.runner(pool).set_keep_alive(false).run().await?)
+fn normalize_concurrency(config: JobRunnerConcurrencyConfig) -> JobRunnerConcurrencyConfig {
+    let min = config.min_concurrency.max(1);
+    let max = config.max_concurrency.max(min);
+    JobRunnerConcurrencyConfig {
+        min_concurrency: min,
+        max_concurrency: max,
+    }
 }
 
 #[job(name = "sync_all_wallets")]
