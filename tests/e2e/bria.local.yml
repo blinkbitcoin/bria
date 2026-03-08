@@ -2,17 +2,6 @@ app:
   blockchain:
     network: regtest
     electrum_url: localhost:50001
-  jobs:
-    runners:
-      account_main:
-        min_concurrency: 2
-        max_concurrency: 4
-      critical:
-        min_concurrency: 2
-        max_concurrency: 4
-      maintenance:
-        min_concurrency: 1
-        max_concurrency: 2
   fees:
     mempool_space:
       url: http://localhost:8999
