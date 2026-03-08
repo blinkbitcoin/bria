@@ -21,9 +21,9 @@ pub struct JobsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunnersConfig {
-    #[serde(default = "default_account_main_runner")]
+    #[serde(default = "default_runner_concurrency")]
     pub account_main: JobRunnerConcurrencyConfig,
-    #[serde(default = "default_critical_runner")]
+    #[serde(default = "default_runner_concurrency")]
     pub critical: JobRunnerConcurrencyConfig,
     #[serde(default = "default_maintenance_runner")]
     pub maintenance: JobRunnerConcurrencyConfig,
@@ -64,8 +64,8 @@ impl Default for JobsConfig {
 impl Default for JobRunnersConfig {
     fn default() -> Self {
         Self {
-            account_main: default_account_main_runner(),
-            critical: default_critical_runner(),
+            account_main: default_runner_concurrency(),
+            critical: default_runner_concurrency(),
             maintenance: default_maintenance_runner(),
         }
     }
@@ -122,14 +122,7 @@ fn default_runner_max_concurrency() -> usize {
     10
 }
 
-fn default_account_main_runner() -> JobRunnerConcurrencyConfig {
-    JobRunnerConcurrencyConfig {
-        min_concurrency: default_runner_min_concurrency(),
-        max_concurrency: default_runner_max_concurrency(),
-    }
-}
-
-fn default_critical_runner() -> JobRunnerConcurrencyConfig {
+fn default_runner_concurrency() -> JobRunnerConcurrencyConfig {
     JobRunnerConcurrencyConfig {
         min_concurrency: default_runner_min_concurrency(),
         max_concurrency: default_runner_max_concurrency(),

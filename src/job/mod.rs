@@ -36,6 +36,8 @@ const RESPAWN_ALL_OUTBOX_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000003"
 
 #[allow(dead_code)]
 pub struct JobRunners {
+    // These handles are intentionally retained for process lifetime so each
+    // runner task keeps running until the app shuts down.
     pub account_main: JobRunnerHandle,
     pub critical: JobRunnerHandle,
     pub maintenance: JobRunnerHandle,
@@ -78,7 +80,8 @@ pub async fn start_job_runners(
         fees_client.clone(),
     );
 
-    let account_main_concurrency = normalize_concurrency(runner_config.account_main);
+    let account_main_concurrency =
+        normalize_concurrency("account_main", runner_config.account_main);
     let account_main = account_main_registry
         .runner(pool)
         .set_channel_names(&["account_main"])
@@ -107,7 +110,7 @@ pub async fn start_job_runners(
         fees_client.clone(),
     );
 
-    let critical_concurrency = normalize_concurrency(runner_config.critical);
+    let critical_concurrency = normalize_concurrency("critical", runner_config.critical);
     let critical = critical_registry
         .runner(pool)
         .set_channel_names(&["wallet_accounting", "batch_signing", "batch_broadcasting"])
@@ -136,7 +139,7 @@ pub async fn start_job_runners(
         fees_client,
     );
 
-    let maintenance_concurrency = normalize_concurrency(runner_config.maintenance);
+    let maintenance_concurrency = normalize_concurrency("maintenance", runner_config.maintenance);
     let maintenance = maintenance_registry
         .runner(pool)
         .set_channel_names(&[
@@ -207,9 +210,22 @@ fn build_job_registry(
     registry
 }
 
-fn normalize_concurrency(config: JobRunnerConcurrencyConfig) -> JobRunnerConcurrencyConfig {
+fn normalize_concurrency(
+    runner_name: &str,
+    config: JobRunnerConcurrencyConfig,
+) -> JobRunnerConcurrencyConfig {
     let min = config.min_concurrency.max(1);
     let max = config.max_concurrency.max(min);
+    if min != config.min_concurrency || max != config.max_concurrency {
+        tracing::warn!(
+            runner_name,
+            requested_min_concurrency = config.min_concurrency,
+            requested_max_concurrency = config.max_concurrency,
+            normalized_min_concurrency = min,
+            normalized_max_concurrency = max,
+            "normalized invalid job runner concurrency"
+        );
+    }
     JobRunnerConcurrencyConfig {
         min_concurrency: min,
         max_concurrency: max,
