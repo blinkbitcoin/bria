@@ -1,3 +1,10 @@
+# [bria release v0.1.126](https://github.com/blinkbitcoin/bria/releases/tag/0.1.126)
+
+
+### Performance
+
+- Reduce bdk sync write churn and optimize sync query paths (#32)
+
 # [bria release v0.1.125](https://github.com/blinkbitcoin/bria/releases/tag/0.1.125)
 
 
