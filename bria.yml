@@ -1,5 +1,19 @@
 # blockchain:
 #   network: regtest
+# jobs:
+#   sync_all_wallets_delay: 5
+#   process_all_payout_queues_delay: 2
+#   respawn_all_outbox_handlers_delay: 5
+#   runners:
+#     account_main:
+#       min_concurrency: 6
+#       max_concurrency: 10
+#     critical:
+#       min_concurrency: 6
+#       max_concurrency: 10
+#     maintenance:
+#       min_concurrency: 2
+#       max_concurrency: 4
 # wallets:
 #   sync_all_delay: 10s
 # admin:

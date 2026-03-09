@@ -76,10 +76,13 @@ impl Wallets {
     pub async fn all_ids(
         &self,
     ) -> Result<impl Iterator<Item = (AccountId, WalletId)>, WalletError> {
-        let rows =
-            sqlx::query!(r#"SELECT DISTINCT account_id, id as wallet_id FROM bria_wallets"#,)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query!(
+            r#"SELECT account_id, id as wallet_id
+               FROM bria_wallets
+               ORDER BY created_at DESC, id DESC"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(|row| {
             (
                 AccountId::from(row.account_id),

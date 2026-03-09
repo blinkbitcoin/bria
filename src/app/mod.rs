@@ -2,7 +2,6 @@ mod config;
 pub mod error;
 
 use bdk::FeeRate;
-use sqlxmq::JobRunnerHandle;
 use tracing::instrument;
 
 use std::collections::HashMap;
@@ -32,7 +31,7 @@ use crate::{
 
 #[allow(dead_code)]
 pub struct App {
-    _runner: JobRunnerHandle,
+    _runners: job::JobRunners,
     outbox: Outbox,
     profiles: Profiles,
     xpubs: XPubs,
@@ -69,7 +68,7 @@ impl App {
         )
         .await?;
         let fees_client = FeesClient::new(config.fees.clone());
-        let runner = job::start_job_runner(
+        let runners = job::start_job_runners(
             &pool,
             outbox.clone(),
             wallets.clone(),
@@ -115,7 +114,7 @@ impl App {
             fees_client,
             batch_inclusion,
             config,
-            _runner: runner,
+            _runners: runners,
         };
         if let Some(deprecrated_encryption_key) = app.config.deprecated_encryption_key.as_ref() {
             app.rotate_encryption_key(deprecrated_encryption_key)
