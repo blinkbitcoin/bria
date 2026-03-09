@@ -23,7 +23,7 @@ impl Utxos {
 
     #[instrument(name = "bdk.utxos.persist_all", skip_all)]
     pub async fn persist_all(&self, utxos: Vec<LocalUtxo>) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 5000;
+        const BATCH_SIZE: usize = 2000;
         let batches = utxos.chunks(BATCH_SIZE);
 
         for batch in batches {

@@ -37,7 +37,7 @@ impl Transactions {
 
     #[instrument(name = "bdk.transactions.persist", skip_all)]
     pub async fn persist_all(&self, txs: Vec<TransactionDetails>) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 5000;
+        const BATCH_SIZE: usize = 2000;
         let batches = txs.chunks(BATCH_SIZE);
 
         for batch in batches {
