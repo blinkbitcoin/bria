@@ -23,7 +23,7 @@ impl Utxos {
 
     #[instrument(name = "bdk.utxos.persist_all", skip_all)]
     pub async fn persist_all(&self, utxos: Vec<LocalUtxo>) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 5000;
+        const BATCH_SIZE: usize = 2000;
         let batches = utxos.chunks(BATCH_SIZE);
 
         for batch in batches {
@@ -40,7 +40,16 @@ impl Utxos {
                 builder.push_bind(utxo.is_spent);
             });
 
-            query_builder.push("ON CONFLICT (keychain_id, tx_id, vout) DO UPDATE SET utxo_json = EXCLUDED.utxo_json, is_spent = EXCLUDED.is_spent, modified_at = NOW(), deleted_at = NULL");
+            query_builder.push(
+                "ON CONFLICT (keychain_id, tx_id, vout) DO UPDATE \
+                 SET utxo_json = EXCLUDED.utxo_json,\
+                     is_spent = EXCLUDED.is_spent,\
+                     modified_at = NOW(),\
+                     deleted_at = NULL \
+                 WHERE bdk_utxos.utxo_json IS DISTINCT FROM EXCLUDED.utxo_json \
+                    OR bdk_utxos.is_spent IS DISTINCT FROM EXCLUDED.is_spent \
+                    OR bdk_utxos.deleted_at IS NOT NULL",
+            );
 
             let query = query_builder.build();
             query
