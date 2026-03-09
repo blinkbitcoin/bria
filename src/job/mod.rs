@@ -804,6 +804,39 @@ fn account_main_channel_arg(account_id: AccountId) -> String {
     format!("account_id:{account_id}")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{normalize_concurrency, JobRunnerConcurrencyConfig};
+
+    #[test]
+    fn normalize_concurrency_clamps_invalid_values() {
+        let normalized = normalize_concurrency(
+            "test",
+            JobRunnerConcurrencyConfig {
+                min_concurrency: 0,
+                max_concurrency: 0,
+            },
+        );
+
+        assert_eq!(normalized.min_concurrency, 1);
+        assert_eq!(normalized.max_concurrency, 1);
+    }
+
+    #[test]
+    fn normalize_concurrency_raises_max_to_min() {
+        let normalized = normalize_concurrency(
+            "test",
+            JobRunnerConcurrencyConfig {
+                min_concurrency: 7,
+                max_concurrency: 3,
+            },
+        );
+
+        assert_eq!(normalized.min_concurrency, 7);
+        assert_eq!(normalized.max_concurrency, 7);
+    }
+}
+
 impl From<(AccountId, PayoutQueueId)> for ProcessPayoutQueueData {
     fn from((account_id, payout_queue_id): (AccountId, PayoutQueueId)) -> Self {
         Self {
