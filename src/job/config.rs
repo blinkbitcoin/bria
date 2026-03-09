@@ -15,6 +15,26 @@ pub struct JobsConfig {
     pub respawn_all_outbox_handlers_delay: Duration,
     #[serde(default)]
     pub signing: SigningJobConfig,
+    #[serde(default)]
+    pub runners: JobRunnersConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRunnersConfig {
+    #[serde(default = "default_runner_concurrency")]
+    pub account_main: JobRunnerConcurrencyConfig,
+    #[serde(default = "default_runner_concurrency")]
+    pub critical: JobRunnerConcurrencyConfig,
+    #[serde(default = "default_maintenance_runner")]
+    pub maintenance: JobRunnerConcurrencyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRunnerConcurrencyConfig {
+    #[serde(default = "default_runner_min_concurrency")]
+    pub min_concurrency: usize,
+    #[serde(default = "default_runner_max_concurrency")]
+    pub max_concurrency: usize,
 }
 
 #[serde_with::serde_as]
@@ -36,6 +56,26 @@ impl Default for JobsConfig {
             process_all_payout_queues_delay: default_process_all_payout_queues_delay(),
             respawn_all_outbox_handlers_delay: default_respawn_all_outbox_handlers_delay(),
             signing: SigningJobConfig::default(),
+            runners: JobRunnersConfig::default(),
+        }
+    }
+}
+
+impl Default for JobRunnersConfig {
+    fn default() -> Self {
+        Self {
+            account_main: default_runner_concurrency(),
+            critical: default_runner_concurrency(),
+            maintenance: default_maintenance_runner(),
+        }
+    }
+}
+
+impl Default for JobRunnerConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            min_concurrency: default_runner_min_concurrency(),
+            max_concurrency: default_runner_max_concurrency(),
         }
     }
 }
@@ -72,4 +112,26 @@ fn default_signing_max_attempts() -> u32 {
 
 fn default_signing_max_retry_delay() -> Duration {
     Duration::from_secs(300)
+}
+
+fn default_runner_min_concurrency() -> usize {
+    6
+}
+
+fn default_runner_max_concurrency() -> usize {
+    10
+}
+
+fn default_runner_concurrency() -> JobRunnerConcurrencyConfig {
+    JobRunnerConcurrencyConfig {
+        min_concurrency: default_runner_min_concurrency(),
+        max_concurrency: default_runner_max_concurrency(),
+    }
+}
+
+fn default_maintenance_runner() -> JobRunnerConcurrencyConfig {
+    JobRunnerConcurrencyConfig {
+        min_concurrency: 2,
+        max_concurrency: 4,
+    }
 }
