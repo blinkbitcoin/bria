@@ -65,7 +65,7 @@ impl Transactions {
                  WHERE bdk_transactions.details_json IS DISTINCT FROM EXCLUDED.details_json \
                     OR bdk_transactions.sent IS DISTINCT FROM EXCLUDED.sent \
                     OR bdk_transactions.height IS DISTINCT FROM EXCLUDED.height \
-                    OR bdk_transactions.deleted_at IS NOT NULL"
+                    OR bdk_transactions.deleted_at IS NOT NULL",
             );
 
             let query = query_builder.build();
