@@ -1,3 +1,15 @@
+# [bria release v0.1.125](https://github.com/blinkbitcoin/bria/releases/tag/0.1.125)
+
+
+### Bug Fixes
+
+- Isolate job runners by channel and add concurrency config (#30)
+- Allow clippy::result_large_err in gRPC server module (#31)
+
+### Testing
+
+- Bitcoin update to 28.3 (#23)
+
 # [bria release v0.1.124](https://github.com/blinkbitcoin/bria/releases/tag/0.1.124)
 
 
