@@ -55,7 +55,18 @@ impl Transactions {
                 builder.push_bind(tx.confirmation_time.as_ref().map(|t| t.height as i32));
             });
 
-            query_builder.push("ON CONFLICT (keychain_id, tx_id) DO UPDATE SET details_json = EXCLUDED.details_json, height = EXCLUDED.height, modified_at = NOW(), deleted_at = NULL");
+            query_builder.push(
+                "ON CONFLICT (keychain_id, tx_id) DO UPDATE \
+                 SET details_json = EXCLUDED.details_json,\
+                     sent = EXCLUDED.sent,\
+                     height = EXCLUDED.height,\
+                     modified_at = NOW(),\
+                     deleted_at = NULL \
+                 WHERE bdk_transactions.details_json IS DISTINCT FROM EXCLUDED.details_json \
+                    OR bdk_transactions.sent IS DISTINCT FROM EXCLUDED.sent \
+                    OR bdk_transactions.height IS DISTINCT FROM EXCLUDED.height \
+                    OR bdk_transactions.deleted_at IS NOT NULL"
+            );
 
             let query = query_builder.build();
             query
