@@ -1,4 +1,5 @@
 #![allow(clippy::blocks_in_conditions)]
+#![allow(clippy::result_large_err)]
 mod convert;
 
 #[allow(clippy::all)]
