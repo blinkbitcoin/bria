@@ -1,51 +1,121 @@
-# [bria release v0.1.114](https://github.com/GaloyMoney/bria/releases/tag/0.1.114)
+# [bria release v0.1.126](https://github.com/blinkbitcoin/bria/releases/tag/0.1.126)
+
+
+### Performance
+
+- Reduce bdk sync write churn and optimize sync query paths (#32)
+
+# [bria release v0.1.125](https://github.com/blinkbitcoin/bria/releases/tag/0.1.125)
 
 
 ### Bug Fixes
 
-- Addressed trailing junk error introduced in 15.x (#654)
-- Handle repo fns which return collections using es_query (#638)
-- Use WalletId from es_entity for entity migration (#630)
+- Isolate job runners by channel and add concurrency config (#30)
+- Allow clippy::result_large_err in gRPC server module (#31)
 
-### Miscellaneous Tasks
+### Testing
 
-- Bump tracing-subscriber from 0.3.18 to 0.3.20 (#655)
-- Bump flake (#652)
-- Rename tests/e2e -> bats (#645)
-- Remove empty files, unnecessary check and update repo (#641)
-- Remove unnecessary derive macros from entities (#637)
+- Bitcoin update to 28.3 (#23)
 
-### Refactor
-
-- Use updated es-entity  (#653)
-- Use accessor to convert to compatible types (#649)
-- Use es_entity for address entity (#644)
-- Use was_not_found for entity errors (#647)
-- Update migration script to avoid redundant update (#646)
-- Use es_entity for payout (#612)
-- Use es_entity for signing session entity (#636)
-- Use es_entity for xpub  (#631)
-
-# [bria release v0.1.113](https://github.com/GaloyMoney/bria/releases/tag/0.1.113)
+# [bria release v0.1.124](https://github.com/blinkbitcoin/bria/releases/tag/0.1.124)
 
 
 ### Bug Fixes
 
-- Use entity_id macro from es_entity (#611)
+- Nix config on darwin (#18)
 
 ### Miscellaneous Tasks
 
-- Add bc to flake (#626)
-- Allow settings docker engine in bats helpers (#625)
-- Add podman and compose to flake (#622)
-- Add test integration makefile target (#615)
+- Update bitcoind and lnd images (#26)
+- Bump sqlx-ledger to 0.11.14 (#25)
+
+# [bria release v0.1.123](https://github.com/blinkbitcoin/bria/releases/tag/0.1.123)
+
+
+### Bug Fixes
+
+- Pin sqlx version to =0.8.2 (#21)
+
+# [bria release v0.1.122](https://github.com/blinkbitcoin/bria/releases/tag/0.1.122)
+
+
+### Miscellaneous Tasks
+
+- Bump sqlx-ledger 0.11.11 (#20)
+
+# [bria release v0.1.121](https://github.com/blinkbitcoin/bria/releases/tag/0.1.121)
+
+
+### Miscellaneous Tasks
+
+- Update sqlx-ledger to 0.11.9 (#19)
+
+# [bria release v0.1.120](https://github.com/blinkbitcoin/bria/releases/tag/0.1.120)
+
+
+### Bug Fixes
+
+- Update journal_events to handle stream close properly (#16)
+
+# [bria release v0.1.119](https://github.com/blinkbitcoin/bria/releases/tag/0.1.119)
+
+
+### Miscellaneous Tasks
+
+- Set fixed version of sqlx ledger (#15)
+
+# [bria release v0.1.118](https://github.com/blinkbitcoin/bria/releases/tag/0.1.118)
+
+
+### Bug Fixes
+
+- Close db connection on loop exit (#13)
+
+### Miscellaneous Tasks
+
+- Rollback sqlx-ledger to 0.11.7 (#12)
+
+# [bria release v0.1.117](https://github.com/blinkbitcoin/bria/releases/tag/0.1.117)
+
+
+### Miscellaneous Tasks
+
+- Bump sqlx-ledger (#11)
+
+# [bria release v0.1.116](https://github.com/blinkbitcoin/bria/releases/tag/0.1.116)
+
+
+### Bug Fixes
+
+- Handle pg_notify payload overflow for high-input transactions (#10)
+
+# [bria release v0.1.115](https://github.com/blinkbitcoin/bria/releases/tag/0.1.115)
+
+
+### Features
+
+- Add fee rate to estimate-payout-fee (#7)
+
+### Miscellaneous Tasks
+
+- Flake update (#8)
+
+# [bria release v0.1.114](https://github.com/blinkbitcoin/bria/releases/tag/0.1.114)
+
+
+### Features
+
+- Add batch drop (#5)
+
+# [bria release v0.1.113](https://github.com/blinkbitcoin/bria/releases/tag/0.1.113)
+
+
+### Miscellaneous Tasks
+
 - Run sqlx-prepare (#608)
 
 ### Refactor
 
-- Move e2e tests to bats directory (#614)
-- Migrate wallet entity to es_entity (#613)
-- Use es_entity framework for profile entity (#609)
 - Use es_entity framework for payout_queue entity (#606)
 
 # [bria release v0.1.112](https://github.com/GaloyMoney/bria/releases/tag/0.1.112)
