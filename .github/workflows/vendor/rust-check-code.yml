@@ -11,6 +11,9 @@ jobs:
   check-code:
     name: Check Code
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v21
