@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                bb.id,\n                bb.payout_queue_id,\n                bbws.batch_cancel_ledger_tx_id as \"ledger_id?\",\n                bbws.batch_created_ledger_tx_id\n            FROM bria_batches bb\n            INNER JOIN bria_batch_wallet_summaries bbws ON bb.id = bbws.batch_id\n            WHERE bb.id = $1\n            FOR UPDATE",
+  "query": "SELECT\n                bb.id,\n                bb.payout_queue_id,\n                bbws.batch_cancel_ledger_tx_id as \"ledger_id?\",\n                bbws.batch_created_ledger_tx_id\n            FROM bria_batches bb\n            INNER JOIN bria_batch_wallet_summaries bbws ON bb.id = bbws.batch_id\n            WHERE bb.id = $1\n            FOR UPDATE OF bbws",
   "describe": {
     "columns": [
       {
@@ -36,5 +36,5 @@
       true
     ]
   },
-  "hash": "13a4239e40ffeea6922e29af9e80aeb37e86cbc426ab54ac79977b0d568ee3e5"
+  "hash": "6bbb40f3f213e4863782995fc0fb2604fdfb92fe28d62c9f38f870122f47aff0"
 }

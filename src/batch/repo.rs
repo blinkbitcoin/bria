@@ -195,8 +195,12 @@ impl Batches {
         .fetch_optional(&mut *tx)
         .await?;
 
-        if cancellation_row.and_then(|row| row.ledger_id).is_some() {
-            return Err(BatchError::BatchAlreadyCancelled);
+        match cancellation_row {
+            None => return Err(BatchError::BatchIdNotFound(batch_id.to_string())),
+            Some(row) if row.ledger_id.is_some() => {
+                return Err(BatchError::BatchAlreadyCancelled);
+            }
+            Some(_) => {}
         }
 
         let rows_affected = sqlx::query!(
@@ -343,7 +347,7 @@ impl Batches {
             FROM bria_batches bb
             INNER JOIN bria_batch_wallet_summaries bbws ON bb.id = bbws.batch_id
             WHERE bb.id = $1
-            FOR UPDATE"#,
+            FOR UPDATE OF bbws"#,
             batch_id as BatchId,
         )
         .fetch_optional(&mut *tx)
