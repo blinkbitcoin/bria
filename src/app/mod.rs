@@ -116,7 +116,6 @@ impl App {
             config,
             _runners: runners,
         };
-        crate::profile::migration::profile_event_migration(&app.pool).await?;
         if let Some(deprecrated_encryption_key) = app.config.deprecated_encryption_key.as_ref() {
             app.rotate_encryption_key(deprecrated_encryption_key)
                 .await?;
@@ -141,15 +140,13 @@ impl App {
         name: String,
         spending_policy: Option<SpendingPolicy>,
     ) -> Result<Profile, ApplicationError> {
-        let mut tx = self.pool.begin().await?;
         let new_profile = NewProfile::builder()
             .account_id(profile.account_id)
             .name(name)
             .spending_policy(spending_policy)
             .build()
             .expect("Couldn't build NewProfile");
-        let new_profile = self.profiles.create_in_tx(&mut tx, new_profile).await?;
-        tx.commit().await?;
+        let new_profile = self.profiles.create(new_profile).await?;
         Ok(new_profile)
     }
 
@@ -162,12 +159,10 @@ impl App {
     ) -> Result<(), ApplicationError> {
         let mut target_profile = self
             .profiles
-            .find_by_id(profile.account_id, profile_id)
+            .find_by_account_id_and_id(profile.account_id, profile_id)
             .await?;
         target_profile.update_spending_policy(spending_policy);
-        let mut tx = self.pool.begin().await?;
-        self.profiles.update(&mut tx, target_profile).await?;
-        tx.commit().await?;
+        self.profiles.update(&mut target_profile).await?;
         Ok(())
     }
 
@@ -185,12 +180,12 @@ impl App {
     ) -> Result<ProfileApiKey, ApplicationError> {
         let found_profile = self
             .profiles
-            .find_by_name(profile.account_id, profile_name)
+            .find_by_account_id_and_name(profile.account_id, profile_name)
             .await?;
         let mut tx = self.pool.begin().await?;
         let key = self
             .profiles
-            .create_key_for_profile_in_tx(&mut tx, found_profile, false)
+            .create_key_for_profile_in_op(&mut tx, found_profile, false)
             .await?;
         tx.commit().await?;
         Ok(key)
@@ -203,7 +198,7 @@ impl App {
         key_name: String,
         xpub: String,
         derivation: Option<String>,
-    ) -> Result<XPubId, ApplicationError> {
+    ) -> Result<XPubFingerprint, ApplicationError> {
         let value = XPub::try_from((&xpub, derivation))?;
         let xpub = NewAccountXPub::builder()
             .account_id(profile.account_id)
@@ -212,8 +207,8 @@ impl App {
             .value(value)
             .build()
             .expect("Couldn't build xpub");
-        let id = self.xpubs.persist(xpub).await?;
-        Ok(id)
+        let fingerprint = self.xpubs.create(xpub).await?.fingerprint();
+        Ok(fingerprint)
     }
 
     #[instrument(name = "app.set_signer_config", skip(self), err)]
@@ -223,6 +218,7 @@ impl App {
         xpub_ref: String,
         config: SignerConfig,
     ) -> Result<(), ApplicationError> {
+        let mut op = self.xpubs.begin_op().await?;
         let mut xpub = self
             .xpubs
             .find_from_ref(
@@ -232,16 +228,18 @@ impl App {
                     .expect("ref should always parse"),
             )
             .await?;
-        let xpub_id = xpub.id();
+        let xpub_fingerprint = xpub.fingerprint();
         xpub.set_signer_config(config, &self.config.signer_encryption.key)?;
-        let mut tx = self.pool.begin().await?;
-        self.xpubs.persist_updated(&mut tx, xpub).await?;
+        self.xpubs.update_signer_config(&mut op, xpub).await?;
         let batch_ids = self
             .signing_sessions
-            .list_batch_ids_for(&mut tx, profile.account_id, xpub_id)
+            .list_batch_ids_for(&mut op, profile.account_id, xpub_fingerprint)
             .await?;
-        job::spawn_all_batch_signings(tx, batch_ids.into_iter().map(|b| (profile.account_id, b)))
-            .await?;
+        job::spawn_all_batch_signings(
+            op.into(),
+            batch_ids.into_iter().map(|b| (profile.account_id, b)),
+        )
+        .await?;
         Ok(())
     }
 
@@ -262,14 +260,14 @@ impl App {
             cipher.decrypt(nonce, deprecated_encrypted_key_bytes.as_slice())?;
         let deprecated_key = chacha20poly1305::Key::clone_from_slice(deprecated_key_bytes.as_ref());
         let xpubs = self.xpubs.list_all_xpubs().await?;
-        let mut tx = self.pool.begin().await?;
+        let mut op = self.xpubs.begin_op().await?;
         for mut xpub in xpubs {
             if let Some(signing_cfg) = xpub.signing_cfg(deprecated_key) {
                 xpub.set_signer_config(signing_cfg, &self.config.signer_encryption.key)?;
-                self.xpubs.persist_updated(&mut tx, xpub).await?;
+                self.xpubs.update_signer_config(&mut op, xpub).await?;
             }
         }
-        tx.commit().await?;
+        op.commit().await?;
         Ok(())
     }
 
@@ -290,7 +288,7 @@ impl App {
                     .expect("ref should always parse"),
             )
             .await?;
-        let xpub_id = xpub.id();
+        let xpub_fingerprint = xpub.fingerprint();
         let xpub = xpub.value;
         let unsigned_psbt = self
             .batches
@@ -304,16 +302,17 @@ impl App {
             .await?
             .ok_or(ApplicationError::SigningSessionNotFoundForBatchId(batch_id))?
             .xpub_sessions;
-        let session = sessions
-            .get_mut(&xpub_id)
-            .ok_or_else(|| ApplicationError::SigningSessionNotFoundForXPubId(xpub_id))?;
+        let session = sessions.get_mut(&xpub_fingerprint).ok_or_else(|| {
+            ApplicationError::SigningSessionNotFoundForXPubFingerprint(xpub_fingerprint)
+        })?;
 
-        let mut tx = self.pool.begin().await?;
+        let mut op = self.signing_sessions.begin_op().await?;
         session.submit_externally_signed_psbt(signed_psbt);
         self.signing_sessions
-            .update_sessions(&mut tx, &sessions)
+            .update_sessions(&mut op, &sessions)
             .await?;
-        job::spawn_all_batch_signings(tx, std::iter::once((profile.account_id, batch_id))).await?;
+        job::spawn_all_batch_signings(op.into(), std::iter::once((profile.account_id, batch_id)))
+            .await?;
         Ok(())
     }
 
@@ -324,7 +323,7 @@ impl App {
         wallet_name: String,
         xpub: String,
         derivation: Option<String>,
-    ) -> Result<(WalletId, Vec<XPubId>), ApplicationError> {
+    ) -> Result<(WalletId, Vec<XPubFingerprint>), ApplicationError> {
         let keychain = if let Ok(xpub) = XPub::try_from((&xpub, derivation)) {
             KeychainConfig::wpkh(xpub)
         } else {
@@ -349,7 +348,7 @@ impl App {
         wallet_name: String,
         external: String,
         internal: String,
-    ) -> Result<(WalletId, Vec<XPubId>), ApplicationError> {
+    ) -> Result<(WalletId, Vec<XPubFingerprint>), ApplicationError> {
         let keychain = KeychainConfig::try_from((external.as_ref(), internal.as_ref()))?;
         self.create_wallet(profile, wallet_name, keychain).await
     }
@@ -361,7 +360,7 @@ impl App {
         wallet_name: String,
         xpubs: Vec<String>,
         threshold: u32,
-    ) -> Result<(WalletId, Vec<XPubId>), ApplicationError> {
+    ) -> Result<(WalletId, Vec<XPubFingerprint>), ApplicationError> {
         let xpub_values: Vec<XPub> = futures::future::try_join_all(
             xpubs
                 .iter()
@@ -385,36 +384,37 @@ impl App {
         profile: &Profile,
         wallet_name: String,
         keychain: KeychainConfig,
-    ) -> Result<(WalletId, Vec<XPubId>), ApplicationError> {
-        let mut tx = self.pool.begin().await?;
+    ) -> Result<(WalletId, Vec<XPubFingerprint>), ApplicationError> {
+        let mut op = self.wallets.begin_op().await?;
         let xpubs = keychain.xpubs();
-        let mut xpub_ids = Vec::new();
+        let mut xpub_fingerprints = Vec::new();
         for xpub in xpubs {
             match self
                 .xpubs
-                .find_from_ref(profile.account_id, xpub.id())
+                .find_from_ref(profile.account_id, xpub.fingerprint())
                 .await
             {
                 Ok(xpub) => {
-                    xpub_ids.push(xpub.id());
+                    xpub_fingerprints.push(xpub.fingerprint());
                 }
                 Err(_) => {
                     let original = xpub.inner().to_string();
                     let xpub = NewAccountXPub::builder()
                         .account_id(profile.account_id)
-                        .key_name(format!("{wallet_name}-{}", xpub.id()))
+                        .key_name(format!("{wallet_name}-{}", xpub.fingerprint()))
                         .original(original)
                         .value(xpub)
                         .build()
                         .expect("Couldn't build xpub");
-                    xpub_ids.push(self.xpubs.persist_in_tx(&mut tx, xpub).await?);
+                    xpub_fingerprints
+                        .push(self.xpubs.create_in_op(&mut op, xpub).await?.fingerprint());
                 }
             }
         }
         let wallet_id = WalletId::new();
         let wallet_ledger_accounts = self
             .ledger
-            .create_ledger_accounts_for_wallet(&mut tx, wallet_id)
+            .create_ledger_accounts_for_wallet(op.tx_mut(), wallet_id)
             .await?;
         let new_wallet = NewWallet::builder()
             .id(wallet_id)
@@ -426,7 +426,7 @@ impl App {
             .ledger_account_ids(wallet_ledger_accounts)
             .build()
             .expect("Couldn't build NewWallet");
-        let wallet_id = self.wallets.create_in_tx(&mut tx, new_wallet).await?;
+        let wallet = self.wallets.create_in_op(&mut op, new_wallet).await?;
         let descriptors = vec![
             NewDescriptor::builder()
                 .account_id(profile.account_id)
@@ -444,10 +444,10 @@ impl App {
                 .expect("Could not build descriptor"),
         ];
         self.descriptors
-            .persist_all_in_tx(&mut tx, descriptors)
+            .persist_all_in_op(&mut op, descriptors)
             .await?;
-        tx.commit().await?;
-        Ok((wallet_id, xpub_ids))
+        op.commit().await?;
+        Ok((wallet.id, xpub_fingerprints))
     }
 
     #[instrument(name = "app.get_wallet_balance_summary", skip(self), err)]
@@ -458,7 +458,7 @@ impl App {
     ) -> Result<WalletBalanceSummary, ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let wallet_ledger_account_balances = self
             .ledger
@@ -492,7 +492,7 @@ impl App {
     ) -> Result<(WalletId, Address), ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let keychain_wallet = wallet.current_keychain_wallet(&self.pool);
         let addr = keychain_wallet.new_external_address().await?;
@@ -511,7 +511,7 @@ impl App {
             builder.external_id(external_id);
         }
         let new_address = builder.build().expect("Couldn't build NewAddress");
-        self.addresses.persist_new_address(new_address).await?;
+        self.addresses.create(new_address).await?;
 
         Ok((wallet.id, address))
     }
@@ -526,7 +526,7 @@ impl App {
     ) -> Result<(), ApplicationError> {
         let mut address = self
             .addresses
-            .find_by_address(profile.account_id, address)
+            .find_by_account_id_and_address(profile.account_id, address)
             .await?;
         if let Some(id) = new_external_id {
             address.update_external_id(id);
@@ -534,7 +534,7 @@ impl App {
         if let Some(metadata) = new_metadata {
             address.update_metadata(metadata);
         }
-        self.addresses.update(address).await?;
+        self.addresses.update(&mut address).await?;
         Ok(())
     }
 
@@ -546,7 +546,7 @@ impl App {
     ) -> Result<(WalletId, Vec<WalletAddress>), ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let addresses = self
             .addresses
@@ -564,7 +564,7 @@ impl App {
     ) -> Result<WalletAddress, ApplicationError> {
         let address = self
             .addresses
-            .find_by_external_id(profile.account_id, external_id)
+            .find_by_account_id_and_external_id(profile.account_id, external_id)
             .await?;
         Ok(address)
     }
@@ -577,7 +577,7 @@ impl App {
     ) -> Result<WalletAddress, ApplicationError> {
         let address = self
             .addresses
-            .find_by_address(profile.account_id, address)
+            .find_by_account_id_and_address(profile.account_id, address)
             .await?;
         Ok(address)
     }
@@ -599,7 +599,7 @@ impl App {
     ) -> Result<(WalletId, Vec<KeychainUtxos>), ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let mut utxos = self
             .utxos
@@ -629,8 +629,8 @@ impl App {
             builder.config(config);
         }
         let payout_queue = builder.build().expect("Couldn't build NewPayoutQueue");
-        let payout_queue_id = self.payout_queues.create(payout_queue).await?;
-        Ok(payout_queue_id)
+        let payout_queue = self.payout_queues.create(payout_queue).await?;
+        Ok(payout_queue.id)
     }
 
     #[instrument(name = "app.trigger_payout_queue", skip(self), err)]
@@ -641,7 +641,7 @@ impl App {
     ) -> Result<(), ApplicationError> {
         let payout_queue = self
             .payout_queues
-            .find_by_name(profile.account_id, name)
+            .find_by_account_id_and_name(profile.account_id, name)
             .await?;
         job::spawn_process_payout_queue(&self.pool, (payout_queue.account_id, payout_queue.id))
             .await?;
@@ -659,7 +659,7 @@ impl App {
     ) -> Result<(Satoshis, FeeRate), ApplicationError> {
         let destination_wallet = self
             .wallets
-            .find_by_name(profile.account_id, destination_wallet_name)
+            .find_by_account_id_and_name(profile.account_id, destination_wallet_name)
             .await?;
         let destination = destination_wallet
             .current_keychain_wallet(&self.pool)
@@ -686,11 +686,11 @@ impl App {
     ) -> Result<(Satoshis, FeeRate), ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let payout_queue = self
             .payout_queues
-            .find_by_name(profile.account_id, queue_name)
+            .find_by_account_id_and_name(profile.account_id, queue_name)
             .await?;
         let mut tx = self.pool.begin().await?;
         let mut unbatched_payouts = self
@@ -758,11 +758,11 @@ impl App {
     ) -> Result<(PayoutId, Option<chrono::DateTime<chrono::Utc>>), ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let payout_queue = self
             .payout_queues
-            .find_by_name(profile.account_id, queue_name)
+            .find_by_account_id_and_name(profile.account_id, queue_name)
             .await?;
         let addr = Address::try_from((address, self.config.blockchain.network))?;
         self.submit_payout(
@@ -792,11 +792,11 @@ impl App {
     ) -> Result<(PayoutId, Option<chrono::DateTime<chrono::Utc>>), ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let payout_queue = self
             .payout_queues
-            .find_by_name(profile.account_id, queue_name)
+            .find_by_account_id_and_name(profile.account_id, queue_name)
             .await?;
         let payout_id = PayoutId::new();
         let (wallet_id, address) = self
@@ -858,11 +858,11 @@ impl App {
             builder.external_id(external_id);
         }
         let new_payout = builder.build().expect("Couldn't build NewPayout");
-        let mut tx = self.pool.begin().await?;
-        let id = self.payouts.create_in_tx(&mut tx, new_payout).await?;
+        let mut op = self.payouts.begin_op().await?;
+        let id = self.payouts.create_in_op(&mut op, new_payout).await?.id;
         self.ledger
             .payout_submitted(
-                tx,
+                op.into(),
                 id,
                 PayoutSubmittedParams {
                     journal_id: wallet.journal_id,
@@ -894,22 +894,22 @@ impl App {
         id: PayoutId,
         skip_committed_check: bool,
     ) -> Result<(), ApplicationError> {
-        let mut tx = self.pool.begin().await?;
+        let mut op = self.payouts.begin_op().await?;
         let mut payout = self
             .payouts
-            .find_by_id_for_cancellation(&mut tx, profile.account_id, id)
+            .find_by_id_for_cancellation(&mut op, profile.account_id, id)
             .await?;
         payout.cancel_payout(profile.id, skip_committed_check)?;
-        self.payouts.update(&mut tx, payout).await?;
+        self.payouts.update_in_op(&mut op, &mut payout).await?;
         self.ledger
-            .payout_cancelled(tx, LedgerTransactionId::new(), id)
+            .payout_cancelled(op.into(), LedgerTransactionId::new(), id)
             .await?;
         Ok(())
     }
 
     #[instrument(name = "app.list_wallets", skip_all, err)]
     pub async fn list_wallets(&self, profile: &Profile) -> Result<Vec<Wallet>, ApplicationError> {
-        Ok(self.wallets.list_by_account_id(profile.account_id).await?)
+        Ok(self.wallets.list_for_account(profile.account_id).await?)
     }
 
     #[instrument(name = "app.find_payout_by_external_id", skip_all, err)]
@@ -920,7 +920,7 @@ impl App {
     ) -> Result<PayoutWithInclusionEstimate, ApplicationError> {
         let payout = self
             .payouts
-            .find_by_external_id(profile.account_id, external_id)
+            .find_by_account_id_and_external_id(profile.account_id, external_id)
             .await?;
         Ok(self
             .batch_inclusion
@@ -934,7 +934,10 @@ impl App {
         profile: &Profile,
         id: PayoutId,
     ) -> Result<PayoutWithInclusionEstimate, ApplicationError> {
-        let payout = self.payouts.find_by_id(profile.account_id, id).await?;
+        let payout = self
+            .payouts
+            .find_by_account_id_and_id(profile.account_id, id)
+            .await?;
         Ok(self
             .batch_inclusion
             .include_estimate(profile.account_id, payout)
@@ -951,7 +954,7 @@ impl App {
     ) -> Result<Vec<PayoutWithInclusionEstimate>, ApplicationError> {
         let wallet = self
             .wallets
-            .find_by_name(profile.account_id, wallet_name)
+            .find_by_account_id_and_name(profile.account_id, wallet_name)
             .await?;
         let payouts = self
             .payouts
@@ -969,11 +972,10 @@ impl App {
         &self,
         profile: &Profile,
     ) -> Result<Vec<PayoutQueue>, ApplicationError> {
-        let payout_queues = self
+        Ok(self
             .payout_queues
-            .list_by_account_id(profile.account_id)
-            .await?;
-        Ok(payout_queues)
+            .list_for_account_id(profile.account_id)
+            .await?)
     }
 
     #[instrument(name = "app.update_payout_queue", skip(self), err)]
@@ -986,15 +988,16 @@ impl App {
     ) -> Result<(), ApplicationError> {
         let mut payout_queue = self
             .payout_queues
-            .find_by_id(profile.account_id, id)
+            .find_by_account_id_and_id(profile.account_id, id)
             .await?;
+
         if let Some(desc) = new_description {
             payout_queue.update_description(desc)
         }
         if let Some(config) = new_config {
             payout_queue.update_config(config)
         }
-        self.payout_queues.update(payout_queue).await?;
+        self.payout_queues.update(&mut payout_queue).await?;
         Ok(())
     }
 

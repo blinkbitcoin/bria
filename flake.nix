@@ -8,7 +8,6 @@
       url = "github:oxalica/rust-overlay";
       inputs = {
         nixpkgs.follows = "nixpkgs";
-        flake-utils.follows = "flake-utils";
       };
     };
   };
@@ -57,6 +56,9 @@
               docker-compose
               bats
               jq
+              podman
+              podman-compose
+              bc
             ];
             shellHook = ''
               # Workaround for nixpkgs xcrun warnings on Darwin

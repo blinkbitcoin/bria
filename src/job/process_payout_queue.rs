@@ -52,7 +52,7 @@ pub(super) async fn execute<'a>(
     JobError,
 > {
     let payout_queue = payout_queues
-        .find_by_id(data.account_id, data.payout_queue_id)
+        .find_by_account_id_and_id(data.account_id, data.payout_queue_id)
         .await?;
     let mut tx = pool.begin().await?;
     let mut unbatched_payouts = payouts
@@ -134,7 +134,7 @@ pub(super) async fn execute<'a>(
             }));
 
         let batch_id = batch.id;
-        batches.create_in_tx(&mut tx, batch).await?;
+        batches.create_in_op(&mut tx, batch).await?;
         utxos
             .reserve_utxos_in_batch(
                 &mut tx,
@@ -191,9 +191,9 @@ pub async fn construct_psbt(
     span.record("payout_queue_id", tracing::field::display(queue_id));
     span.record("n_unbatched_payouts", unbatched_payouts.n_payouts());
 
-    let wallets = wallets.find_by_ids(unbatched_payouts.wallet_ids()).await?;
+    let wallets = wallets.find_all(&unbatched_payouts.wallet_ids()).await?;
     let reserved_utxos = {
-        let keychain_ids = wallets.values().flat_map(|w| w.keychain_ids());
+        let keychain_ids = wallets.values().flat_map(|w: &Wallet| w.keychain_ids());
         utxos
             .outpoints_bdk_should_not_select(tx, keychain_ids)
             .await?

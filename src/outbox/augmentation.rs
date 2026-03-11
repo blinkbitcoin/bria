@@ -46,7 +46,7 @@ impl Augmenter {
             } => {
                 let address_info = self
                     .addresses
-                    .find_by_address(account_id, address.to_string())
+                    .find_by_account_id_and_address(account_id, address.to_string())
                     .await?;
                 Ok(Augmentation {
                     address: Some(AddressAugmentation {
@@ -63,7 +63,10 @@ impl Augmenter {
             | OutboxEventPayload::PayoutCommitted { id, .. }
             | OutboxEventPayload::PayoutBroadcast { id, .. }
             | OutboxEventPayload::PayoutSettled { id, .. } => {
-                let payout = self.payouts.find_by_id(account_id, id).await?;
+                let payout = self
+                    .payouts
+                    .find_by_account_id_and_id(account_id, id)
+                    .await?;
                 let payout = self
                     .batch_inclusion
                     .include_estimate(account_id, payout)

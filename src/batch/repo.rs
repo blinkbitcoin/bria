@@ -23,10 +23,10 @@ impl Batches {
         Self { pool: pool.clone() }
     }
 
-    #[instrument(name = "batches.create_in_tx", skip_all)]
-    pub async fn create_in_tx<'a>(
+    #[instrument(name = "batches.create_in_op", skip_all)]
+    pub async fn create_in_op(
         &self,
-        tx: &mut Transaction<'a, Postgres>,
+        op: &mut impl es_entity::AtomicOperation,
         batch: NewBatch,
     ) -> Result<BatchId, BatchError> {
         let serializied_psbt = batch.unsigned_psbt.serialize();
@@ -39,7 +39,7 @@ impl Batches {
             i64::from(batch.total_fee_sats),
             batch.tx_id.as_ref() as &[u8],
             serializied_psbt.as_slice() as &[u8],
-        ).execute(&mut **tx).await?;
+        ).execute(op.as_executor()).await?;
 
         let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"INSERT INTO bria_batch_wallet_summaries (
@@ -75,7 +75,7 @@ impl Batches {
             },
         );
         let query = query_builder.build();
-        query.execute(&mut **tx).await?;
+        query.execute(op.as_executor()).await?;
 
         Ok(batch.id)
     }

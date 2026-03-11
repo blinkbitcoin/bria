@@ -1,5 +1,6 @@
 mod helpers;
 
+use es_entity::EsEntityError;
 use rand::distributions::{Alphanumeric, DistString};
 
 use bria::{
@@ -23,9 +24,9 @@ async fn external_id_does_not_exist() -> anyhow::Result<()> {
 
     assert!(matches!(
         err,
-        Err(ApplicationError::AddressError(
-            AddressError::ExternalIdNotFound
-        ))
+        Err(ApplicationError::AddressError(AddressError::EsEntityError(
+            EsEntityError::NotFound
+        )))
     ));
 
     Ok(())
@@ -93,7 +94,7 @@ async fn payout_queue_id_not_found() -> anyhow::Result<()> {
     assert!(matches!(
         err,
         Err(ApplicationError::PayoutQueueError(
-            PayoutQueueError::PayoutQueueIdNotFound(_)
+            PayoutQueueError::EsEntityError(EsEntityError::NotFound)
         ))
     ));
     Ok(())
@@ -108,9 +109,9 @@ async fn wallet_name_not_found() -> anyhow::Result<()> {
     let err = app.new_address(&profile, wallet_name, None, None).await;
     assert!(matches!(
         err,
-        Err(ApplicationError::WalletError(
-            WalletError::WalletNameNotFound(_)
-        ))
+        Err(ApplicationError::WalletError(WalletError::EsEntityError(
+            EsEntityError::NotFound
+        )))
     ));
     Ok(())
 }
@@ -141,7 +142,7 @@ async fn payout_queue_name_not_found() -> anyhow::Result<()> {
     assert!(matches!(
         err,
         Err(ApplicationError::PayoutQueueError(
-            PayoutQueueError::PayoutQueueNameNotFound(_)
+            PayoutQueueError::EsEntityError(EsEntityError::NotFound)
         ))
     ));
 
@@ -158,9 +159,9 @@ async fn profile_name_not_found() -> anyhow::Result<()> {
         .await;
     assert!(matches!(
         err,
-        Err(ApplicationError::ProfileError(
-            ProfileError::ProfileNameNotFound(_)
-        ))
+        Err(ApplicationError::ProfileError(ProfileError::EsEntityError(
+            EsEntityError::NotFound
+        )))
     ));
     Ok(())
 }
