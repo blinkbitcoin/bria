@@ -331,7 +331,7 @@ impl UtxoRepo {
         Ok(())
     }
 
-    #[instrument(name = "utxos.unreserve_utxos_for_batch", skip(self, tx))]
+    #[instrument(name = "utxo_repo.unreserve_utxos_for_batch", skip(self, tx))]
     pub async fn unreserve_utxos_for_batch(
         &self,
         tx: &mut Transaction<'_, Postgres>,
