@@ -14,6 +14,6 @@ pub enum BatchError {
     PsbtDeserializationError(#[from] crate::primitives::bitcoin::psbt::Error),
     #[error("BatchError - Batch is already cancelled")]
     BatchAlreadyCancelled,
-    #[error("BatchError - Batch is already signed and can't be cancelled")]
+    #[error("BatchError - Batch is already signed")]
     BatchAlreadySigned,
 }
