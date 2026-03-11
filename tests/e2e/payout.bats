@@ -305,8 +305,23 @@ teardown_file() {
   batch=$(bria_cmd get-batch -b "${batch_id}")
   [[ $(echo ${batch} | jq -r '.id') == "${batch_id}" && $(echo ${batch} | jq -r '.cancelled') == "false" ]] || exit 1
 
+  # Capture at least one UTXO reserved for this batch before cancellation
+  reserved_outpoint=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT tx_id || ':' || vout FROM bria_utxos WHERE spending_batch_id = '${batch_id}' LIMIT 1" | tr -d '[:space:]')
+  [[ -n "${reserved_outpoint}" ]] || exit 1
+  reserved_for_batch_before=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT COUNT(*) FROM bria_utxos WHERE spending_batch_id = '${batch_id}'" | tr -d '[:space:]')
+  [[ "${reserved_for_batch_before}" -ge 1 ]] || exit 1
+
   # Cancel the batch
   bria_cmd cancel-batch --batch-id "${batch_id}"
+
+  # Verify reservation fields were cleared for the cancelled batch
+  reserved_for_batch_after=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT COUNT(*) FROM bria_utxos WHERE spending_batch_id = '${batch_id}'" | tr -d '[:space:]')
+  [[ "${reserved_for_batch_after}" == "0" ]] || exit 1
+
+  reserved_txid=${reserved_outpoint%:*}
+  reserved_vout=${reserved_outpoint#*:}
+  reserved_fields=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT (spending_batch_id IS NULL AND spending_payout_queue_id IS NULL AND spending_sats_per_vbyte IS NULL)::int FROM bria_utxos WHERE tx_id = '${reserved_txid}' AND vout = ${reserved_vout} LIMIT 1" | tr -d '[:space:]')
+  [[ "${reserved_fields}" == "1" ]] || exit 1
 
   # Verify the payout is marked as cancelled
   for i in {1..20}; do

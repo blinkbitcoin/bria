@@ -255,6 +255,15 @@ impl Utxos {
             .await
     }
 
+    #[instrument(name = "utxos.unreserve_utxos_for_batch", skip_all, err)]
+    pub async fn unreserve_utxos_for_batch(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        batch_id: BatchId,
+    ) -> Result<(), UtxoError> {
+        self.utxos.unreserve_utxos_for_batch(tx, batch_id).await
+    }
+
     pub async fn average_utxo_value(
         &self,
         wallet_id: WalletId,

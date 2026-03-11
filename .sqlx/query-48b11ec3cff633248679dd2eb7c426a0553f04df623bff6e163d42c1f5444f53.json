@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bria_utxos\n               SET spending_batch_id = NULL,\n                   spending_payout_queue_id = NULL,\n                   spending_sats_per_vbyte = NULL\n               WHERE spending_batch_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "48b11ec3cff633248679dd2eb7c426a0553f04df623bff6e163d42c1f5444f53"
+}

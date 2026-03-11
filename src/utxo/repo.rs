@@ -1,4 +1,5 @@
 use sqlx::{Pool, Postgres, QueryBuilder, Row, Transaction};
+use tracing::instrument;
 use uuid::Uuid;
 
 use std::collections::{HashMap, HashSet};
@@ -327,6 +328,25 @@ impl UtxoRepo {
 
         let query = query_builder.build();
         query.execute(&mut **tx).await?;
+        Ok(())
+    }
+
+    #[instrument(name = "utxo_repo.unreserve_utxos_for_batch", skip(self, tx))]
+    pub async fn unreserve_utxos_for_batch(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        batch_id: BatchId,
+    ) -> Result<(), UtxoError> {
+        sqlx::query!(
+            r#"UPDATE bria_utxos
+               SET spending_batch_id = NULL,
+                   spending_payout_queue_id = NULL,
+                   spending_sats_per_vbyte = NULL
+               WHERE spending_batch_id = $1"#,
+            batch_id as BatchId,
+        )
+        .execute(&mut **tx)
+        .await?;
         Ok(())
     }
 
