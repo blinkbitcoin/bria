@@ -1043,13 +1043,17 @@ impl App {
             .validate_cancellation()
             .map_err(ApplicationError::BatchError)?;
 
-        let (tx, batch_info, tx_id) = self
+        let (mut tx, batch_info, tx_id) = self
             .batches
             .set_batch_cancel_ledger_tx_id(batch.id)
             .await?
             .ok_or_else(|| {
                 ApplicationError::BatchError(BatchError::BatchIdNotFound(batch_id.to_string()))
             })?;
+
+        self.utxos
+            .unreserve_utxos_for_batch(&mut tx, batch.id)
+            .await?;
 
         self.ledger
             .batch_dropped(tx, tx_id, batch_info.created_ledger_tx_id)
@@ -1064,7 +1068,14 @@ impl App {
             for payout in wallet_payouts {
                 // Skip committed check since we're cancelling the whole batch
                 // and we've already verified the batch isn't signed
-                self.cancel_payout(profile, payout.id, true).await.ok();
+                if let Err(e) = self.cancel_payout(profile, payout.id, true).await {
+                    tracing::error!(
+                        payout_id = %payout.id,
+                        batch_id = %batch_id,
+                        error = ?e,
+                        "Failed to cancel payout during batch drop - manual intervention may be required"
+                    );
+                }
             }
         }
 
