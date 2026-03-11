@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v4
+        uses: DeterminateSystems/nix-installer-action@v21
       - name: Run the Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v2
-      - uses: actions/checkout@v3
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+      - uses: actions/checkout@v6
       - name: Run e2e tests
         env:
           PG_CON: postgres://user:password@127.0.0.1:5432/pg
