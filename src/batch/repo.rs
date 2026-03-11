@@ -199,7 +199,7 @@ impl Batches {
             return Err(BatchError::BatchAlreadyCancelled);
         }
 
-        sqlx::query!(
+        let rows_affected = sqlx::query!(
             r#"UPDATE bria_batches
                SET signed_tx = $1
                WHERE id = $2 AND signed_tx IS NULL"#,
@@ -207,7 +207,12 @@ impl Batches {
             batch_id as BatchId,
         )
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(BatchError::BatchAlreadySigned);
+        }
 
         tx.commit().await?;
 
