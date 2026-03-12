@@ -41,6 +41,25 @@ pub async fn execute(
     signer_encryption_config: SignerEncryptionConfig,
 ) -> Result<(BatchSigningData, bool), JobError> {
     let span = tracing::Span::current();
+    let batch = batches.find_by_id(data.account_id, data.batch_id).await?;
+    span.record("tx_id", tracing::field::display(batch.bitcoin_tx_id));
+    if batch.is_signed() {
+        span.record("finalization_status", "already_signed");
+        tracing::info!(
+            batch_id = %data.batch_id,
+            "Batch already signed before signing job execution; skipping"
+        );
+        return Ok((data, true));
+    }
+    if batch.is_cancelled() {
+        span.record("finalization_status", "already_cancelled");
+        tracing::info!(
+            batch_id = %data.batch_id,
+            "Batch already cancelled before signing job execution; skipping"
+        );
+        return Ok((data, false));
+    }
+
     let mut stalled = false;
     let mut last_err = None;
     let mut current_keychain = None;
@@ -52,8 +71,6 @@ pub async fn execute(
     } else {
         let mut new_sessions = HashMap::new();
         let mut account_xpubs = HashMap::new();
-        let batch = batches.find_by_id(data.account_id, data.batch_id).await?;
-        span.record("tx_id", tracing::field::display(batch.bitcoin_tx_id));
         let unsigned_psbt = batch.unsigned_psbt;
         for (wallet_id, summary) in batch.wallet_summaries {
             let wallet = wallets.find_by_id(wallet_id).await?;
@@ -183,8 +200,26 @@ pub async fn execute(
             (Ok(Some(finalized_psbt)), _) => {
                 span.record("finalization_status", "complete");
                 let tx = finalized_psbt.extract_tx();
-                batches.set_signed_tx(data.batch_id, tx).await?;
-                Ok((data, true))
+                match batches.set_signed_tx(data.batch_id, tx).await {
+                    Ok(()) => Ok((data, true)),
+                    Err(BatchError::BatchAlreadySigned) => {
+                        span.record("finalization_status", "already_signed");
+                        tracing::info!(
+                            batch_id = %data.batch_id,
+                            "Batch already signed while finalizing; treating as idempotent completion"
+                        );
+                        Ok((data, true))
+                    }
+                    Err(BatchError::BatchAlreadyCancelled) => {
+                        span.record("finalization_status", "already_cancelled");
+                        tracing::info!(
+                            batch_id = %data.batch_id,
+                            "Batch cancelled while finalizing; stopping signing retries"
+                        );
+                        Ok((data, false))
+                    }
+                    Err(err) => Err(err.into()),
+                }
             }
             (_, Some(e)) => {
                 span.record("finalization_status", "returning_last_error");
