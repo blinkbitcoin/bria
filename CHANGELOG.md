@@ -1,3 +1,17 @@
+# [bria release v0.1.127](https://github.com/blinkbitcoin/bria/releases/tag/0.1.127)
+
+
+### Bug Fixes
+
+- Handle stale bitcoind signer index during batch signing (#37)
+- Guard batch signing and cancellation races (#35)
+- Release UTXO reservations when cancelling batches (#34)
+
+### Miscellaneous Tasks
+
+- Upgrade bdk to 0.30.2 (#38)
+- Update GitHub Action version pins (#36)
+
 # [bria release v0.1.126](https://github.com/blinkbitcoin/bria/releases/tag/0.1.126)
 
 
