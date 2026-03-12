@@ -107,7 +107,12 @@ pub async fn execute(
             }
             Err(err) => {
                 session.attempt_failed(&err);
-                tracing::error!("{}", err.to_string());
+                tracing::error!(
+                    batch_id = %data.batch_id,
+                    xpub_id = %xpub_id,
+                    error = ?err,
+                    "Batch signing failed while building signer client"
+                );
                 last_err = Some(err);
                 continue;
             }
@@ -122,7 +127,12 @@ pub async fn execute(
                     session.attempt_failed(SigningFailureReason::SigningClientError {
                         err: err.to_string(),
                     });
-                    tracing::error!("{}", err.to_string());
+                    tracing::error!(
+                        batch_id = %data.batch_id,
+                        xpub_id = %xpub_id,
+                        error = ?err,
+                        "Batch signing failed while validating signed PSBT"
+                    );
                     last_err = Some(SigningClientError::RemoteSignedPsbtInvalid(err.to_string()));
                     continue;
                 }
@@ -130,7 +140,12 @@ pub async fn execute(
             }
             Err(err) => {
                 session.attempt_failed(&err);
-                tracing::error!("{}", err.to_string());
+                tracing::error!(
+                    batch_id = %data.batch_id,
+                    xpub_id = %xpub_id,
+                    error = ?err,
+                    "Batch signing failed while signing PSBT"
+                );
                 last_err = Some(err);
                 continue;
             }
