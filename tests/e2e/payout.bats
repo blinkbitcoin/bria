@@ -400,62 +400,6 @@ teardown_file() {
   [[ $(echo ${batch} | jq -r '.id') == "${batch_id}" && $(echo ${batch} | jq -r '.cancelled') == "false" ]] || exit 1
 }
 
-@test "payout: Batch is not marked signed when bitcoind signer index is stale" {
-  bria_cmd set-signer-config \
-    --xpub "68bfb290" bitcoind \
-    --endpoint "${BITCOIND_SIGNER_ENDPOINT}" \
-    --rpc-user "rpcuser" \
-    --rpc-password "rpcpassword"
-
-  bria_cmd create-wallet -n stale_signer_index wpkh -x 68bfb290 || true
-  bria_cmd create-payout-queue -n stale_signer_queue -m true || true
-
-  for i in {1..1021}; do
-    stale_address=$(bria_cmd new-address -w stale_signer_index | jq -r '.address')
-  done
-  [[ -n "${stale_address}" ]] || exit 1
-
-  bitcoin_cli -regtest sendtoaddress "${stale_address}" 1
-  bitcoin_cli -generate 10
-
-  for i in {1..60}; do
-    cache_wallet_balance stale_signer_index
-    [[ $(cached_current_settled) -ge 100000000 ]] && break
-    sleep 1
-  done
-  [[ $(cached_current_settled) -ge 100000000 ]] || exit 1
-
-  payout_id=$(bria_cmd submit-payout -w stale_signer_index --queue-name stale_signer_queue --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 1000000 | jq -r '.id')
-  [[ "${payout_id}" != "null" ]] || exit 1
-
-  for i in {1..20}; do
-    bria_cmd trigger-payout-queue --name stale_signer_queue
-    batch_id=$(bria_cmd get-payout -i "${payout_id}" | jq -r '.payout.batchId')
-    [[ "${batch_id}" != "null" ]] && break
-    sleep 2
-  done
-  [[ "${batch_id}" != "null" ]] || exit 1
-
-  for i in {1..60}; do
-    batch=$(bria_cmd get-batch -b "${batch_id}")
-    signing_sessions_count=$(echo ${batch} | jq -r '.signingSessions | length')
-    signing_state=$(echo ${batch} | jq -r '.signingSessions[0].state')
-    signing_failure_reason=$(echo ${batch} | jq -r '.signingSessions[0].failureReason')
-    [[ "${signing_sessions_count}" -ge 1 ]] || { sleep 1; continue; }
-    [[ "${signing_state}" == "Failed" ]] && break
-    [[ "${signing_failure_reason}" != "null" ]] && break
-    sleep 1
-  done
-
-  [[ "${signing_state}" != "Complete" ]] || exit 1
-  [[ "${signing_failure_reason}" == "WalletError - Submitted Psbt does not have valid signatures." ]] || exit 1
-
-  bria_cmd cancel-batch --batch-id "${batch_id}"
-
-  batch=$(bria_cmd get-batch -b "${batch_id}")
-  [[ $(echo ${batch} | jq -r '.cancelled') == "true" ]] || exit 1
-}
-
 @test "payout: Estimate payout fee returns positive fee and fee_rate" {
   bria_address=$(bria_cmd new-address -w default | jq -r '.address')
   [[ -n "${bria_address}" ]] || exit 1
@@ -641,4 +585,92 @@ teardown_file() {
   settled=$(cached_current_settled)
   echo "Final settled balance: ${settled}"
   [[ "${settled}" -gt "0" && "${settled}" -le "5000000" ]] || exit 1
+}
+
+@test "payout: Batch is not marked signed when bitcoind signer index is stale" {
+  bitcoin_cli -generate 6
+  bitcoin_signer_cli -named sendall recipients="[\"bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej\"]" fee_rate=1 || true
+  bitcoin_cli -generate 6
+
+  bria_cmd set-signer-config \
+    --xpub "68bfb290" bitcoind \
+    --endpoint "${BITCOIND_SIGNER_ENDPOINT}" \
+    --rpc-user "rpcuser" \
+    --rpc-password "rpcpassword"
+
+  bria_cmd create-payout-queue -n stale_signer_queue -m true || true
+
+  # Advance Bria's address index until we hit an address that bitcoind signer
+  # does not recognize in its imported descriptor range.
+  stale_address=""
+  signer_knows_address="true"
+  for i in {1..3000}; do
+    stale_address=$(bria_cmd new-address -w default | jq -r '.address')
+    if (( i % 150 == 0 )); then
+      signer_knows_address=$(bitcoin_signer_cli -rpcwallet=default getaddressinfo "${stale_address}" | jq -r '.ismine')
+      [[ "${signer_knows_address}" == "false" ]] && break
+    fi
+  done
+  if [[ "${signer_knows_address}" != "false" ]]; then
+    signer_knows_address=$(bitcoin_signer_cli -rpcwallet=default getaddressinfo "${stale_address}" | jq -r '.ismine')
+  fi
+  [[ -n "${stale_address}" ]] || exit 1
+  [[ "${signer_knows_address}" == "false" ]] || exit 1
+
+  bitcoin_cli -regtest sendtoaddress "${stale_address}" 1
+  bitcoin_cli -generate 6
+
+  for i in {1..60}; do
+    cache_wallet_balance default
+    [[ $(cached_current_settled) -ge 100000000 ]] && break
+    sleep 1
+  done
+  [[ $(cached_current_settled) -ge 100000000 ]] || exit 1
+
+  payout_id=$(bria_cmd submit-payout -w default --queue-name stale_signer_queue --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 99000000 | jq -r '.id')
+  [[ "${payout_id}" != "null" ]] || exit 1
+
+  for i in {1..20}; do
+    bria_cmd trigger-payout-queue --name stale_signer_queue
+    batch_id=$(bria_cmd get-payout -i "${payout_id}" | jq -r '.payout.batchId')
+    [[ "${batch_id}" != "null" ]] && break
+    sleep 2
+  done
+  [[ "${batch_id}" != "null" ]] || exit 1
+
+  for i in {1..60}; do
+    batch=$(bria_cmd get-batch -b "${batch_id}")
+    signing_sessions_count=$(echo ${batch} | jq -r '.signingSessions | length')
+    signing_state=$(echo ${batch} | jq -r '.signingSessions[0].state')
+    signing_failure_reason=$(echo ${batch} | jq -r '.signingSessions[0].failureReason')
+    [[ "${signing_sessions_count}" -ge 1 ]] || { sleep 1; continue; }
+    [[ "${signing_state}" == "Failed" ]] && break
+    [[ "${signing_failure_reason}" != "null" ]] && break
+    sleep 1
+  done
+
+  echo "${batch_id}"
+  [[ "${signing_state}" != "Complete" ]] || exit 1
+  [[ "${signing_failure_reason}" == "WalletError - Submitted Psbt does not have valid signatures." ]] || exit 1
+
+  bria_cmd cancel-batch --batch-id "${batch_id}"
+
+  batch=$(bria_cmd get-batch -b "${batch_id}")
+  [[ $(echo ${batch} | jq -r '.cancelled') == "true" ]] || exit 1
+
+  # Re-sync signer index so subsequent tests start from a clean state.
+  signer_knows_address=$(bitcoin_signer_cli -rpcwallet=default getaddressinfo "${stale_address}" | jq -r '.ismine')
+  if [[ "${signer_knows_address}" != "true" ]]; then
+    for i in {1..3000}; do
+      bitcoin_signer_cli -rpcwallet=default getnewaddress > /dev/null
+      if (( i % 50 == 0 )); then
+        signer_knows_address=$(bitcoin_signer_cli -rpcwallet=default getaddressinfo "${stale_address}" | jq -r '.ismine')
+        [[ "${signer_knows_address}" == "true" ]] && break
+      fi
+    done
+    if [[ "${signer_knows_address}" != "true" ]]; then
+      signer_knows_address=$(bitcoin_signer_cli -rpcwallet=default getaddressinfo "${stale_address}" | jq -r '.ismine')
+    fi
+  fi
+  [[ "${signer_knows_address}" == "true" ]] || exit 1
 }

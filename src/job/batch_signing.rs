@@ -123,7 +123,7 @@ pub async fn execute(
                         err: err.to_string(),
                     });
                     tracing::error!("{}", err.to_string());
-                    last_err = Some(SigningClientError::RemoteCallFailure(err.to_string()));
+                    last_err = Some(SigningClientError::RemoteSignedPsbtInvalid(err.to_string()));
                     continue;
                 }
                 session.remote_signing_complete(psbt);

@@ -8,6 +8,8 @@ pub enum SigningClientError {
     CouldNotConnect(String),
     #[error("SigningClientError - RemoteCallFailure: {0}")]
     RemoteCallFailure(String),
+    #[error("SigningClientError - RemoteSignedPsbtInvalid: {0}")]
+    RemoteSignedPsbtInvalid(String),
     #[error("SigningClientError - Decode: {0}")]
     Decode(#[from] base64::DecodeError),
     #[error("SigningClientError - HexDecode: {0}")]
