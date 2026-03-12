@@ -107,18 +107,45 @@ pub async fn execute(
             }
             Err(err) => {
                 session.attempt_failed(&err);
-                tracing::error!("{}", err.to_string());
+                tracing::error!(
+                    batch_id = %data.batch_id,
+                    xpub_id = %xpub_id,
+                    error = ?err,
+                    "Batch signing failed while building signer client"
+                );
                 last_err = Some(err);
                 continue;
             }
         };
         match client.sign_psbt(&session.unsigned_psbt).await {
             Ok(psbt) => {
+                if let Err(err) = psbt_validator::validate_psbt(
+                    &psbt,
+                    account_xpub.value.clone(),
+                    &session.unsigned_psbt,
+                ) {
+                    session.attempt_failed(SigningFailureReason::SigningClientError {
+                        err: err.to_string(),
+                    });
+                    tracing::error!(
+                        batch_id = %data.batch_id,
+                        xpub_id = %xpub_id,
+                        error = ?err,
+                        "Batch signing failed while validating signed PSBT"
+                    );
+                    last_err = Some(SigningClientError::RemoteSignedPsbtInvalid(err.to_string()));
+                    continue;
+                }
                 session.remote_signing_complete(psbt);
             }
             Err(err) => {
                 session.attempt_failed(&err);
-                tracing::error!("{}", err.to_string());
+                tracing::error!(
+                    batch_id = %data.batch_id,
+                    xpub_id = %xpub_id,
+                    error = ?err,
+                    "Batch signing failed while signing PSBT"
+                );
                 last_err = Some(err);
                 continue;
             }
