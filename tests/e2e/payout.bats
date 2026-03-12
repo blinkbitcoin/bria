@@ -385,7 +385,7 @@ teardown_file() {
   # Try to cancel the batch
   run bria_cmd cancel-batch --batch-id "${batch_id}"
   [[ "$status" -ne 0 ]]
-  [[ "$output" == *"BatchError - Batch is already signed and can't be cancelled"* ]]
+  [[ "$output" == *"BatchError - Batch is already signed"* ]]
 
   # Check that the funds are no longer encumbered
   for i in {1..20}; do

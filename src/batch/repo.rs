@@ -171,13 +171,54 @@ impl Batches {
         batch_id: BatchId,
         bitcoin_tx: bitcoin::Transaction,
     ) -> Result<(), BatchError> {
-        sqlx::query!(
-            r#"UPDATE bria_batches SET signed_tx = $1 WHERE id = $2"#,
+        let mut tx = self.pool.begin().await?;
+
+        let batch_row = sqlx::query!(
+            r#"SELECT id FROM bria_batches WHERE id = $1 FOR UPDATE"#,
+            batch_id as BatchId,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if batch_row.is_none() {
+            return Err(BatchError::BatchIdNotFound(batch_id.to_string()));
+        }
+
+        let cancellation_row = sqlx::query!(
+            r#"SELECT batch_cancel_ledger_tx_id as "ledger_id?"
+               FROM bria_batch_wallet_summaries
+               WHERE batch_id = $1
+               LIMIT 1
+               FOR UPDATE"#,
+            batch_id as BatchId,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        match cancellation_row {
+            None => return Err(BatchError::BatchIdNotFound(batch_id.to_string())),
+            Some(row) if row.ledger_id.is_some() => {
+                return Err(BatchError::BatchAlreadyCancelled);
+            }
+            Some(_) => {}
+        }
+
+        let rows_affected = sqlx::query!(
+            r#"UPDATE bria_batches
+               SET signed_tx = $1
+               WHERE id = $2 AND signed_tx IS NULL"#,
             bitcoin::consensus::encode::serialize(&bitcoin_tx),
             batch_id as BatchId,
         )
-        .execute(&self.pool)
-        .await?;
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(BatchError::BatchAlreadySigned);
+        }
+
+        tx.commit().await?;
 
         Ok(())
     }
@@ -283,6 +324,20 @@ impl Batches {
         batch_id: BatchId,
     ) -> Result<Option<(Transaction<'_, Postgres>, BatchInfo, LedgerTxId)>, BatchError> {
         let mut tx = self.pool.begin().await?;
+
+        let batch_row = sqlx::query!(
+            r#"SELECT signed_tx FROM bria_batches WHERE id = $1 FOR UPDATE"#,
+            batch_id as BatchId,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        match batch_row {
+            None => return Ok(None),
+            Some(row) if row.signed_tx.is_some() => return Err(BatchError::BatchAlreadySigned),
+            Some(_) => {}
+        }
+
         let row = sqlx::query!(
             r#"SELECT
                 bb.id,
@@ -292,7 +347,7 @@ impl Batches {
             FROM bria_batches bb
             INNER JOIN bria_batch_wallet_summaries bbws ON bb.id = bbws.batch_id
             WHERE bb.id = $1
-            FOR UPDATE"#,
+            FOR UPDATE OF bbws"#,
             batch_id as BatchId,
         )
         .fetch_optional(&mut *tx)

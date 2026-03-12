@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bria_batches\n               SET signed_tx = $1\n               WHERE id = $2 AND signed_tx IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "385466ed1ee455656f60924d33d1a027785beb0d246c2cb5b1214ff397c23692"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT batch_cancel_ledger_tx_id as \"ledger_id?\"\n               FROM bria_batch_wallet_summaries\n               WHERE batch_id = $1\n               LIMIT 1\n               FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ledger_id?",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "96baebb33138c57190f902cb1360890f8f4cb2101e4a2e8946948ea5d6e59679"
+}
