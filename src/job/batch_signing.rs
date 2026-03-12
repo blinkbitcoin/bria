@@ -42,7 +42,7 @@ pub async fn execute(
 ) -> Result<(BatchSigningData, bool), JobError> {
     let span = tracing::Span::current();
     let batch = batches.find_by_id(data.account_id, data.batch_id).await?;
-    span.record("tx_id", tracing::field::display(batch.bitcoin_tx_id));
+    span.record("txid", tracing::field::display(batch.bitcoin_tx_id));
     if batch.is_signed() {
         span.record("finalization_status", "already_signed");
         tracing::info!(
@@ -185,7 +185,7 @@ pub async fn execute(
         }
         if current_keychain.is_none() {
             let batch = batches.find_by_id(data.account_id, data.batch_id).await?;
-            span.record("tx_id", tracing::field::display(batch.bitcoin_tx_id));
+            span.record("txid", tracing::field::display(batch.bitcoin_tx_id));
             let wallet_id = batch.wallet_summaries.into_keys().next().unwrap();
             let wallet = wallets.find_by_id(wallet_id).await?;
             current_keychain = Some(wallet.current_keychain_wallet(&pool));
