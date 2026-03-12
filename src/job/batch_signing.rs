@@ -114,6 +114,18 @@ pub async fn execute(
         };
         match client.sign_psbt(&session.unsigned_psbt).await {
             Ok(psbt) => {
+                if let Err(err) = psbt_validator::validate_psbt(
+                    &psbt,
+                    account_xpub.value.clone(),
+                    &session.unsigned_psbt,
+                ) {
+                    session.attempt_failed(SigningFailureReason::SigningClientError {
+                        err: err.to_string(),
+                    });
+                    tracing::error!("{}", err.to_string());
+                    last_err = Some(SigningClientError::RemoteCallFailure(err.to_string()));
+                    continue;
+                }
                 session.remote_signing_complete(psbt);
             }
             Err(err) => {
