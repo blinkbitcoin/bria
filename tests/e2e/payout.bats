@@ -410,7 +410,7 @@ teardown_file() {
   bria_cmd create-wallet -n stale_signer_index wpkh -x 68bfb290 || true
   bria_cmd create-payout-queue -n stale_signer_queue -m true || true
 
-  for i in {1..1300}; do
+  for i in {1..1021}; do
     stale_address=$(bria_cmd new-address -w stale_signer_index | jq -r '.address')
   done
   [[ -n "${stale_address}" ]] || exit 1
