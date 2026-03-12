@@ -1,3 +1,10 @@
+# [bria release v0.1.128](https://github.com/blinkbitcoin/bria/releases/tag/0.1.128)
+
+
+### Bug Fixes
+
+- Make batch signing idempotent for signed batches (#39)
+
 # [bria release v0.1.127](https://github.com/blinkbitcoin/bria/releases/tag/0.1.127)
 
 
