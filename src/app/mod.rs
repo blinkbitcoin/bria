@@ -695,7 +695,12 @@ impl App {
         let mut tx = self.pool.begin().await?;
         let mut unbatched_payouts = self
             .payouts
-            .list_unbatched_for_estimation(&mut tx, profile.account_id, payout_queue.id)
+            .list_unbatched(
+                &mut tx,
+                profile.account_id,
+                payout_queue.id,
+                PayoutSelectionMode::Estimation,
+            )
             .await?;
         let destination = Address::try_from((destination, self.config.blockchain.network))?;
         let payout_id = uuid::Uuid::new_v4();

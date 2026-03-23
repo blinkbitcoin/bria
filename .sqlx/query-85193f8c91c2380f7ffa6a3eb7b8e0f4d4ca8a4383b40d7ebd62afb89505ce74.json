@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT keychain_id,\n                       (kind = 'external') AS \"income_address!\",\n                       tx_id, vout, spending_batch_id, income_settled_ledger_tx_id\n                       FROM bria_utxos\n                       WHERE keychain_id = ANY($1) AND bdk_spent = false",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "keychain_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "income_address!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "tx_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "vout",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "spending_batch_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "income_settled_ledger_tx_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "85193f8c91c2380f7ffa6a3eb7b8e0f4d4ca8a4383b40d7ebd62afb89505ce74"
+}

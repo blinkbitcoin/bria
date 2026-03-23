@@ -1,4 +1,4 @@
-use sqlx::{Pool, Postgres, Row, Transaction};
+use sqlx::{Pool, Postgres, Transaction};
 use tracing::instrument;
 
 use std::collections::HashMap;
@@ -9,6 +9,23 @@ use crate::{entity::*, primitives::*};
 #[derive(Debug, Clone)]
 pub struct Payouts {
     pool: Pool<Postgres>,
+}
+
+#[derive(Debug, Clone, Copy)]
+/// Controls whether unbatched payout rows are locked during selection.
+///
+/// - `Payout`: lock selected rows with `FOR UPDATE` to avoid concurrent batch conflicts.
+/// - `Estimation`: do not lock rows during fee estimation.
+pub enum PayoutSelectionMode {
+    Payout,
+    Estimation,
+}
+
+struct UnbatchedPayoutRow {
+    id: uuid::Uuid,
+    wallet_id: uuid::Uuid,
+    sequence: i32,
+    event: serde_json::Value,
 }
 
 impl Payouts {
@@ -102,62 +119,57 @@ impl Payouts {
         Ok(Payout::try_from(entity_events)?)
     }
 
-    #[instrument(name = "payouts.list_unbatched", skip(self))]
+    #[instrument(name = "payouts.list_unbatched", skip(self), fields(mode = ?mode))]
     pub async fn list_unbatched(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         account_id: AccountId,
         payout_queue_id: PayoutQueueId,
+        mode: PayoutSelectionMode,
     ) -> Result<UnbatchedPayouts, PayoutError> {
-        self.list_unbatched_internal(tx, account_id, payout_queue_id, true)
-            .await
-    }
+        let rows = match mode {
+            PayoutSelectionMode::Payout => {
+                sqlx::query_as!(
+                    UnbatchedPayoutRow,
+                    r#"
+                      SELECT b.id, b.wallet_id, e.sequence, e.event
+                      FROM bria_payouts b
+                      JOIN bria_payout_events e ON b.id = e.id
+                      WHERE b.batch_id IS NULL AND b.account_id = $1 AND b.payout_queue_id = $2
+                      ORDER BY b.created_at, b.id, e.sequence
+                      FOR UPDATE"#,
+                    account_id as AccountId,
+                    payout_queue_id as PayoutQueueId,
+                )
+                .fetch_all(&mut **tx)
+                .await?
+            }
+            PayoutSelectionMode::Estimation => {
+                sqlx::query_as!(
+                    UnbatchedPayoutRow,
+                    r#"
+                      SELECT b.id, b.wallet_id, e.sequence, e.event
+                      FROM bria_payouts b
+                      JOIN bria_payout_events e ON b.id = e.id
+                      WHERE b.batch_id IS NULL AND b.account_id = $1 AND b.payout_queue_id = $2
+                      ORDER BY b.created_at, b.id, e.sequence"#,
+                    account_id as AccountId,
+                    payout_queue_id as PayoutQueueId,
+                )
+                .fetch_all(&mut **tx)
+                .await?
+            }
+        };
 
-    #[instrument(name = "payouts.list_unbatched_for_estimation", skip(self))]
-    pub async fn list_unbatched_for_estimation(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        account_id: AccountId,
-        payout_queue_id: PayoutQueueId,
-    ) -> Result<UnbatchedPayouts, PayoutError> {
-        self.list_unbatched_internal(tx, account_id, payout_queue_id, false)
-            .await
-    }
-
-    async fn list_unbatched_internal(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        account_id: AccountId,
-        payout_queue_id: PayoutQueueId,
-        lock: bool,
-    ) -> Result<UnbatchedPayouts, PayoutError> {
-        let mut query = String::from(
-            r#"
-              SELECT b.*, e.sequence, e.event
-              FROM bria_payouts b
-              JOIN bria_payout_events e ON b.id = e.id
-              WHERE b.batch_id IS NULL AND b.account_id = $1 AND b.payout_queue_id = $2
-              ORDER BY b.created_at, b.id, e.sequence"#,
-        );
-        if lock {
-            query.push_str(" FOR UPDATE");
-        }
-        let rows = sqlx::query(&query)
-            .bind(account_id)
-            .bind(payout_queue_id)
-            .fetch_all(&mut **tx)
-            .await?;
         let mut wallet_payouts = Vec::new();
         let mut entity_events: HashMap<PayoutId, EntityEvents<PayoutEvent>> = HashMap::new();
         for row in rows {
-            let wallet_id = WalletId::from(row.try_get::<uuid::Uuid, _>("wallet_id")?);
-            let id = PayoutId::from(row.try_get::<uuid::Uuid, _>("id")?);
+            let wallet_id = WalletId::from(row.wallet_id);
+            let id = PayoutId::from(row.id);
             wallet_payouts.push((id, wallet_id));
             let events = entity_events.entry(id).or_insert_with(EntityEvents::new);
-            let sequence = row.try_get::<i32, _>("sequence")?;
-            let event = row.try_get::<serde_json::Value, _>("event")?;
             events
-                .load_event(sequence as usize, event)
+                .load_event(row.sequence as usize, row.event)
                 .map_err(PayoutError::EntityError)?;
         }
         let mut payouts: HashMap<WalletId, Vec<UnbatchedPayout>> = HashMap::new();
