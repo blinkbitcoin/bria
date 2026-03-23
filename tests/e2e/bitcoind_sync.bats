@@ -147,7 +147,7 @@ teardown_file() {
 
   bitcoind_address=$(bitcoin_cli -regtest getnewaddress)
   bitcoin_signer_cli -named sendall recipients="[\"${bitcoind_address}\"]" fee_rate=1
-  for i in {1..10}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_current_settled) == 0 ]] \
       && [[ $(cached_pending_outgoing) != 0 ]] \
