@@ -261,25 +261,13 @@ impl UtxoRepo {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ids: impl Iterator<Item = KeychainId>,
+        mode: super::UtxoSelectionMode,
     ) -> Result<Vec<ReservableUtxo>, UtxoError> {
-        self.find_reservable_utxos_internal(tx, ids, true).await
-    }
-
-    pub async fn find_reservable_utxos_for_estimation(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        ids: impl Iterator<Item = KeychainId>,
-    ) -> Result<Vec<ReservableUtxo>, UtxoError> {
-        self.find_reservable_utxos_internal(tx, ids, false).await
-    }
-
-    async fn find_reservable_utxos_internal(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        ids: impl Iterator<Item = KeychainId>,
-        lock: bool,
-    ) -> Result<Vec<ReservableUtxo>, UtxoError> {
-        let uuids = ids.into_iter().map(Uuid::from).collect::<Vec<_>>();
+        let for_update = matches!(mode, super::UtxoSelectionMode::Payout);
+        let uuids = ids.map(Uuid::from).collect::<Vec<_>>();
+        if uuids.is_empty() {
+            return Ok(vec![]);
+        }
         let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"SELECT keychain_id,
                CASE WHEN kind = 'external' THEN true ELSE false END as income_address,
@@ -289,7 +277,7 @@ impl UtxoRepo {
         );
         query_builder.push_bind(&uuids[..]);
         query_builder.push(") AND bdk_spent = false");
-        if lock {
+        if for_update {
             query_builder.push(" FOR UPDATE");
         }
         let query = query_builder.build();
@@ -395,11 +383,11 @@ impl UtxoRepo {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut map = HashMap::new();
+        let mut map: HashMap<LedgerTransactionId, Vec<bitcoin::OutPoint>> = HashMap::new();
         let mut sum = Satoshis::ZERO;
         for row in rows {
             map.entry(LedgerTransactionId::from(row.income_detected_ledger_tx_id))
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(bitcoin::OutPoint {
                     txid: row.tx_id.parse().unwrap(),
                     vout: row.vout as u32,

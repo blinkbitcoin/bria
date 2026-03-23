@@ -27,8 +27,7 @@ impl FeesClient {
                     error = %err,
                     "mempool_space fee estimation failed, falling back to blockstream"
                 );
-                let fee_rate = self.blockstream.fee_rate(priority).await?;
-                fee_rate
+                self.blockstream.fee_rate(priority).await?
             }
         };
         tracing::Span::current()

@@ -194,10 +194,7 @@ pub async fn construct_psbt(
     let wallets = wallets.find_by_ids(unbatched_payouts.wallet_ids()).await?;
     let reserved_utxos = {
         let keychain_ids = wallets.values().flat_map(|w| w.keychain_ids());
-        let mut mode = crate::utxo::UtxoSelectionMode::Payout;
-        if for_estimation {
-            mode = crate::utxo::UtxoSelectionMode::Estimation;
-        }
+        let mode = UtxoSelectionMode::from(for_estimation);
         utxos
             .outpoints_bdk_should_not_select(tx, keychain_ids, mode)
             .await?
