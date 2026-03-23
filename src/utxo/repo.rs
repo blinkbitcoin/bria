@@ -262,36 +262,7 @@ impl UtxoRepo {
         tx: &mut Transaction<'_, Postgres>,
         ids: impl Iterator<Item = KeychainId>,
     ) -> Result<Vec<ReservableUtxo>, UtxoError> {
-        let uuids = ids.into_iter().map(Uuid::from).collect::<Vec<_>>();
-        let rows = sqlx::query!(
-            r#"SELECT keychain_id,
-               CASE WHEN kind = 'external' THEN true ELSE false END as income_address,
-               tx_id, vout, spending_batch_id, income_settled_ledger_tx_id
-               FROM bria_utxos
-               WHERE keychain_id = ANY($1) AND bdk_spent = false
-               FOR UPDATE"#,
-            &uuids[..]
-        )
-        .fetch_all(&mut **tx)
-        .await?;
-
-        let reservable_utxos = rows
-            .into_iter()
-            .map(|row| ReservableUtxo {
-                keychain_id: KeychainId::from(row.keychain_id),
-                income_address: row.income_address.unwrap_or_default(),
-                outpoint: OutPoint {
-                    txid: row.tx_id.parse().unwrap(),
-                    vout: row.vout as u32,
-                },
-                spending_batch_id: row.spending_batch_id.map(BatchId::from),
-                utxo_settled_ledger_tx_id: row
-                    .income_settled_ledger_tx_id
-                    .map(LedgerTransactionId::from),
-            })
-            .collect();
-
-        Ok(reservable_utxos)
+        self.find_reservable_utxos_internal(tx, ids, true).await
     }
 
     pub async fn find_reservable_utxos_for_estimation(
@@ -299,35 +270,50 @@ impl UtxoRepo {
         tx: &mut Transaction<'_, Postgres>,
         ids: impl Iterator<Item = KeychainId>,
     ) -> Result<Vec<ReservableUtxo>, UtxoError> {
+        self.find_reservable_utxos_internal(tx, ids, false).await
+    }
+
+    async fn find_reservable_utxos_internal(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ids: impl Iterator<Item = KeychainId>,
+        lock: bool,
+    ) -> Result<Vec<ReservableUtxo>, UtxoError> {
         let uuids = ids.into_iter().map(Uuid::from).collect::<Vec<_>>();
-        let rows = sqlx::query!(
+        let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"SELECT keychain_id,
                CASE WHEN kind = 'external' THEN true ELSE false END as income_address,
                tx_id, vout, spending_batch_id, income_settled_ledger_tx_id
                FROM bria_utxos
-               WHERE keychain_id = ANY($1) AND bdk_spent = false"#,
-            &uuids[..]
-        )
-        .fetch_all(&mut **tx)
-        .await?;
+               WHERE keychain_id = ANY("#,
+        );
+        query_builder.push_bind(&uuids[..]);
+        query_builder.push(") AND bdk_spent = false");
+        if lock {
+            query_builder.push(" FOR UPDATE");
+        }
+        let query = query_builder.build();
+        let rows = query.fetch_all(&mut **tx).await?;
 
-        let reservable_utxos = rows
+        Ok(rows
             .into_iter()
             .map(|row| ReservableUtxo {
-                keychain_id: KeychainId::from(row.keychain_id),
-                income_address: row.income_address.unwrap_or_default(),
+                keychain_id: KeychainId::from(row.get::<Uuid, _>("keychain_id")),
+                income_address: row
+                    .get::<Option<bool>, _>("income_address")
+                    .unwrap_or_default(),
                 outpoint: OutPoint {
-                    txid: row.tx_id.parse().unwrap(),
-                    vout: row.vout as u32,
+                    txid: row.get::<String, _>("tx_id").parse().unwrap(),
+                    vout: row.get::<i32, _>("vout") as u32,
                 },
-                spending_batch_id: row.spending_batch_id.map(BatchId::from),
+                spending_batch_id: row
+                    .get::<Option<Uuid>, _>("spending_batch_id")
+                    .map(BatchId::from),
                 utxo_settled_ledger_tx_id: row
-                    .income_settled_ledger_tx_id
+                    .get::<Option<Uuid>, _>("income_settled_ledger_tx_id")
                     .map(LedgerTransactionId::from),
             })
-            .collect();
-
-        Ok(reservable_utxos)
+            .collect())
     }
 
     pub async fn reserve_utxos_in_batch(

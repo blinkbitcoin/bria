@@ -1,4 +1,4 @@
-use sqlx::{Pool, Postgres, Transaction};
+use sqlx::{Pool, Postgres, Row, Transaction};
 use tracing::instrument;
 
 use std::collections::HashMap;
@@ -109,52 +109,8 @@ impl Payouts {
         account_id: AccountId,
         payout_queue_id: PayoutQueueId,
     ) -> Result<UnbatchedPayouts, PayoutError> {
-        let rows = sqlx::query!(
-            r#"
-              SELECT b.*, e.sequence, e.event
-              FROM bria_payouts b
-              JOIN bria_payout_events e ON b.id = e.id
-              WHERE b.batch_id IS NULL AND b.account_id = $1 AND b.payout_queue_id = $2
-              ORDER BY b.created_at, b.id, e.sequence FOR UPDATE"#,
-            account_id as AccountId,
-            payout_queue_id as PayoutQueueId,
-        )
-        .fetch_all(&mut **tx)
-        .await?;
-        let mut wallet_payouts = Vec::new();
-        let mut entity_events = HashMap::new();
-        for row in rows {
-            let wallet_id = WalletId::from(row.wallet_id);
-            let id = WalletId::from(row.id);
-            wallet_payouts.push((id, wallet_id));
-            let events = entity_events.entry(id).or_insert_with(EntityEvents::new);
-            events.load_event(row.sequence as usize, row.event)?;
-        }
-        let mut payouts: HashMap<WalletId, Vec<UnbatchedPayout>> = HashMap::new();
-        for (id, wallet_id) in wallet_payouts {
-            if let Some(events) = entity_events.remove(&id) {
-                payouts
-                    .entry(wallet_id)
-                    .or_default()
-                    .push(UnbatchedPayout::try_from(events)?);
-            }
-        }
-        let filtered_payouts: HashMap<WalletId, Vec<UnbatchedPayout>> = payouts
-            .into_iter()
-            .map(|(wallet_id, unbatched_payouts)| {
-                let filtered_unbatched_payouts = unbatched_payouts
-                    .into_iter()
-                    .filter(|payout| {
-                        !payout
-                            .events
-                            .iter()
-                            .any(|event| matches!(event, PayoutEvent::Cancelled { .. }))
-                    })
-                    .collect();
-                (wallet_id, filtered_unbatched_payouts)
-            })
-            .collect();
-        Ok(UnbatchedPayouts::new(filtered_payouts))
+        self.list_unbatched_internal(tx, account_id, payout_queue_id, true)
+            .await
     }
 
     #[instrument(name = "payouts.list_unbatched_for_estimation", skip(self))]
@@ -164,26 +120,45 @@ impl Payouts {
         account_id: AccountId,
         payout_queue_id: PayoutQueueId,
     ) -> Result<UnbatchedPayouts, PayoutError> {
-        let rows = sqlx::query!(
+        self.list_unbatched_internal(tx, account_id, payout_queue_id, false)
+            .await
+    }
+
+    async fn list_unbatched_internal(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        account_id: AccountId,
+        payout_queue_id: PayoutQueueId,
+        lock: bool,
+    ) -> Result<UnbatchedPayouts, PayoutError> {
+        let mut query = String::from(
             r#"
               SELECT b.*, e.sequence, e.event
               FROM bria_payouts b
               JOIN bria_payout_events e ON b.id = e.id
               WHERE b.batch_id IS NULL AND b.account_id = $1 AND b.payout_queue_id = $2
               ORDER BY b.created_at, b.id, e.sequence"#,
-            account_id as AccountId,
-            payout_queue_id as PayoutQueueId,
-        )
-        .fetch_all(&mut **tx)
-        .await?;
+        );
+        if lock {
+            query.push_str(" FOR UPDATE");
+        }
+        let rows = sqlx::query(&query)
+            .bind(account_id)
+            .bind(payout_queue_id)
+            .fetch_all(&mut **tx)
+            .await?;
         let mut wallet_payouts = Vec::new();
-        let mut entity_events = HashMap::new();
+        let mut entity_events: HashMap<PayoutId, EntityEvents<PayoutEvent>> = HashMap::new();
         for row in rows {
-            let wallet_id = WalletId::from(row.wallet_id);
-            let id = WalletId::from(row.id);
+            let wallet_id = WalletId::from(row.try_get::<uuid::Uuid, _>("wallet_id")?);
+            let id = PayoutId::from(row.try_get::<uuid::Uuid, _>("id")?);
             wallet_payouts.push((id, wallet_id));
             let events = entity_events.entry(id).or_insert_with(EntityEvents::new);
-            events.load_event(row.sequence as usize, row.event)?;
+            let sequence = row.try_get::<i32, _>("sequence")?;
+            let event = row.try_get::<serde_json::Value, _>("event")?;
+            events
+                .load_event(sequence as usize, event)
+                .map_err(PayoutError::EntityError)?;
         }
         let mut payouts: HashMap<WalletId, Vec<UnbatchedPayout>> = HashMap::new();
         for (id, wallet_id) in wallet_payouts {
@@ -331,11 +306,11 @@ impl Payouts {
     ) -> Result<(usize, Satoshis), PayoutError> {
         let res = sqlx::query!(
             r#"
-            SELECT 
+            SELECT
                 COALESCE(ROUND(AVG(counts)), 0) AS "average_payouts_per_batch!",
                 COALESCE(ROUND(AVG(satoshis)), 0) AS "average_payout_value!"
             FROM (
-                SELECT 
+                SELECT
                     bria_payouts.batch_id,
                     COUNT(*) AS counts,
                     AVG((event->>'satoshis')::NUMERIC) AS satoshis

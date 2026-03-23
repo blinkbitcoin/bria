@@ -219,9 +219,8 @@ impl Utxos {
         ids: impl Iterator<Item = KeychainId>,
         mode: UtxoSelectionMode,
     ) -> Result<HashMap<KeychainId, Vec<OutPoint>>, UtxoError> {
-        // Here we list all Utxos that bdk might want to use and lock them (FOR UPDATE)
-        // This ensures that we don't have 2 concurrent psbt constructions get in the way
-        // of each other
+        // We list all UTXOs BDK might want to use. In payout mode we lock rows (FOR UPDATE)
+        // to avoid concurrent PSBT construction conflicts; estimation mode skips locking.
         let reservable_utxos = match mode {
             UtxoSelectionMode::Payout => self.utxos.find_reservable_utxos(tx, ids).await?,
             UtxoSelectionMode::Estimation => {
