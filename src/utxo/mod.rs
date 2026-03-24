@@ -16,6 +16,22 @@ pub use entity::*;
 use error::UtxoError;
 use repo::*;
 
+#[derive(Debug, Clone, Copy)]
+pub enum UtxoSelectionMode {
+    Payout,
+    Estimation,
+}
+
+impl From<bool> for UtxoSelectionMode {
+    fn from(for_estimation: bool) -> Self {
+        if for_estimation {
+            Self::Estimation
+        } else {
+            Self::Payout
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Utxos {
     utxos: UtxoRepo,
@@ -211,11 +227,11 @@ impl Utxos {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ids: impl Iterator<Item = KeychainId>,
+        mode: UtxoSelectionMode,
     ) -> Result<HashMap<KeychainId, Vec<OutPoint>>, UtxoError> {
-        // Here we list all Utxos that bdk might want to use and lock them (FOR UPDATE)
-        // This ensures that we don't have 2 concurrent psbt constructions get in the way
-        // of each other
-        let reservable_utxos = self.utxos.find_reservable_utxos(tx, ids).await?;
+        // We list all UTXOs BDK might want to use. In payout mode we lock rows (FOR UPDATE)
+        // to avoid concurrent PSBT construction conflicts; estimation mode skips locking.
+        let reservable_utxos = self.utxos.find_reservable_utxos(tx, ids, mode).await?;
 
         // We need to tell bdk which utxos not to select.
         // If we have included it in a batch OR
@@ -229,12 +245,9 @@ impl Utxos {
             }
         });
 
-        let mut outpoints_map = HashMap::new();
+        let mut outpoints_map: HashMap<KeychainId, Vec<OutPoint>> = HashMap::new();
         for (keychain_id, outpoint) in filtered_utxos {
-            outpoints_map
-                .entry(keychain_id)
-                .or_insert_with(Vec::new)
-                .push(outpoint);
+            outpoints_map.entry(keychain_id).or_default().push(outpoint);
         }
 
         Ok(outpoints_map)

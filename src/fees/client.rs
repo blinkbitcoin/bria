@@ -20,10 +20,15 @@ impl FeesClient {
 
     #[instrument(name = "fees.fee_rate", skip(self), fields(fee_rate), err)]
     pub async fn fee_rate(&self, priority: TxPriority) -> Result<FeeRate, FeeEstimationError> {
-        let fee_rate = if let Ok(fee_rate) = self.mempool_space.fee_rate(priority).await {
-            fee_rate
-        } else {
-            self.blockstream.fee_rate(priority).await?
+        let fee_rate = match self.mempool_space.fee_rate(priority).await {
+            Ok(fee_rate) => fee_rate,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "mempool_space fee estimation failed, falling back to blockstream"
+                );
+                self.blockstream.fee_rate(priority).await?
+            }
         };
         tracing::Span::current()
             .record("fee_rate", tracing::field::display(format!("{fee_rate:?}")));

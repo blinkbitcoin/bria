@@ -46,10 +46,15 @@ impl BlockstreamClient {
 
         let url = format!("{}{}", self.config.url, "/api/fee-estimates");
         let resp = client.get(&url).send().await?;
-        let fee_estimations = resp
-            .json::<FeeEstimatesResponse>()
-            .await
-            .map_err(FeeEstimationError::CouldNotDecodeResponseBody)?;
+        let status = resp.status();
+        let fee_estimations = resp.json::<FeeEstimatesResponse>().await.map_err(|err| {
+            tracing::warn!(
+                status = %status,
+                error = %err,
+                "blockstream fee estimation response decode failed"
+            );
+            FeeEstimationError::CouldNotDecodeResponseBody(err)
+        })?;
         match priority {
             TxPriority::HalfHour => Ok(FeeRate::from_sat_per_vb(fee_estimations.half_hour_fee)),
             TxPriority::OneHour => Ok(FeeRate::from_sat_per_vb(fee_estimations.hour_fee)),

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT keychain_id,\n               CASE WHEN kind = 'external' THEN true ELSE false END as income_address,\n               tx_id, vout, spending_batch_id, income_settled_ledger_tx_id\n               FROM bria_utxos\n               WHERE keychain_id = ANY($1) AND bdk_spent = false\n               FOR UPDATE",
+  "query": "SELECT keychain_id,\n                       (kind = 'external') AS \"income_address!\",\n                       tx_id, vout, spending_batch_id, income_settled_ledger_tx_id\n                       FROM bria_utxos\n                       WHERE keychain_id = ANY($1) AND bdk_spent = false\n                       FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "income_address",
+        "name": "income_address!",
         "type_info": "Bool"
       },
       {
@@ -48,5 +48,5 @@
       true
     ]
   },
-  "hash": "4077d342c7a9bbbe5441301ce1841c6c152f629a8eed79c111e3c2b5fcef1c67"
+  "hash": "8719842b0d7aa8193c7286e62521c2bb183b75d669b8a6becf0fb1f01709a74c"
 }

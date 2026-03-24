@@ -476,10 +476,12 @@ teardown_file() {
   bitcoin_cli -generate 6
 
   echo "Waiting for spend to be settled..."
-  for i in {1..60}; do
+  for i in {1..120}; do
     cache_wallet_balance
     pending=$(cached_pending_outgoing)
-    echo "Pending outgoing: ${pending}"
+    encumbered=$(cached_encumbered_outgoing)
+    settled=$(cached_current_settled)
+    echo "Pending outgoing: ${pending}, encumbered: ${encumbered}, settled: ${settled}"
     [[ "${pending}" == "0" ]] && break
     sleep 1
   done

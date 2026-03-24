@@ -56,7 +56,12 @@ pub(super) async fn execute<'a>(
         .await?;
     let mut tx = pool.begin().await?;
     let mut unbatched_payouts = payouts
-        .list_unbatched(&mut tx, data.account_id, data.payout_queue_id)
+        .list_unbatched(
+            &mut tx,
+            data.account_id,
+            data.payout_queue_id,
+            PayoutSelectionMode::Payout,
+        )
         .await?;
     let fee_rate = fees_client
         .fee_rate(payout_queue.config.tx_priority)
@@ -194,8 +199,9 @@ pub async fn construct_psbt(
     let wallets = wallets.find_by_ids(unbatched_payouts.wallet_ids()).await?;
     let reserved_utxos = {
         let keychain_ids = wallets.values().flat_map(|w| w.keychain_ids());
+        let mode = UtxoSelectionMode::from(for_estimation);
         utxos
-            .outpoints_bdk_should_not_select(tx, keychain_ids)
+            .outpoints_bdk_should_not_select(tx, keychain_ids, mode)
             .await?
     };
     span.record(
