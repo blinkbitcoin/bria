@@ -1,3 +1,14 @@
+# [bria release v0.1.129](https://github.com/blinkbitcoin/bria/releases/tag/0.1.129)
+
+
+### Bug Fixes
+
+- Avoid db lock during fee estimation (#29)
+
+### Miscellaneous Tasks
+
+- Rollback tonic_lnd update (#41)
+
 # [bria release v0.1.128](https://github.com/blinkbitcoin/bria/releases/tag/0.1.128)
 
 
