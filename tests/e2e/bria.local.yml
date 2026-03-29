@@ -5,3 +5,5 @@ app:
   fees:
     mempool_space:
       url: http://localhost:8999
+db:
+  pool_size: 100
