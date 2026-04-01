@@ -1,4 +1,5 @@
 use bdk::FeeRate;
+use governor::{Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -19,33 +20,38 @@ struct FeeEstimatesResponse {
 #[derive(Clone, Debug)]
 pub struct BlockstreamClient {
     config: BlockstreamConfig,
+    client: reqwest_middleware::ClientWithMiddleware,
 }
 
 impl BlockstreamClient {
     pub fn new(config: BlockstreamConfig) -> Self {
-        Self { config }
+        let rate_limit_per_second = super::non_zero_rate_limit_value(
+            config.rate_limit_per_second,
+            "blockstream",
+            "rate_limit_per_second",
+        );
+        let rate_limit_burst = super::non_zero_rate_limit_value(
+            config.rate_limit_burst,
+            "blockstream",
+            "rate_limit_burst",
+        );
+        let limiter = std::sync::Arc::new(RateLimiter::direct(
+            Quota::per_second(rate_limit_per_second).allow_burst(rate_limit_burst),
+        ));
+        let client = super::build_http_client(
+            config.timeout,
+            config.number_of_retries,
+            "blockstream",
+            limiter,
+        );
+
+        Self { config, client }
     }
 
     #[instrument(name = "blockstream.fee_rate", skip(self), ret, err)]
     pub async fn fee_rate(&self, priority: TxPriority) -> Result<FeeRate, FeeEstimationError> {
-        let min_retry_interval = std::time::Duration::from_secs(1);
-        let max_retry_interval = std::time::Duration::from_secs(30 * 60);
-        let retry_policy = reqwest_retry::policies::ExponentialBackoff::builder()
-            .retry_bounds(min_retry_interval, max_retry_interval)
-            .build_with_max_retries(self.config.number_of_retries);
-        let client = reqwest_middleware::ClientBuilder::new(
-            reqwest::Client::builder()
-                .timeout(self.config.timeout)
-                .build()
-                .expect("could not build reqwest client"),
-        )
-        .with(reqwest_retry::RetryTransientMiddleware::new_with_policy(
-            retry_policy,
-        ))
-        .build();
-
         let url = format!("{}{}", self.config.url, "/api/fee-estimates");
-        let resp = client.get(&url).send().await?;
+        let resp = self.client.get(&url).send().await?;
         let status = resp.status();
         let fee_estimations = resp.json::<FeeEstimatesResponse>().await.map_err(|err| {
             tracing::warn!(
@@ -73,6 +79,10 @@ pub struct BlockstreamConfig {
     pub timeout: std::time::Duration,
     #[serde(default = "default_number_of_retries")]
     pub number_of_retries: u32,
+    #[serde(default = "default_rate_limit_per_second")]
+    pub rate_limit_per_second: u32,
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: u32,
 }
 
 impl Default for BlockstreamConfig {
@@ -81,6 +91,8 @@ impl Default for BlockstreamConfig {
             url: default_url(),
             timeout: default_timeout(),
             number_of_retries: default_number_of_retries(),
+            rate_limit_per_second: default_rate_limit_per_second(),
+            rate_limit_burst: default_rate_limit_burst(),
         }
     }
 }
@@ -94,5 +106,13 @@ fn default_timeout() -> std::time::Duration {
 }
 
 fn default_number_of_retries() -> u32 {
+    2
+}
+
+fn default_rate_limit_per_second() -> u32 {
+    1
+}
+
+fn default_rate_limit_burst() -> u32 {
     2
 }
