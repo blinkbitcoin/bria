@@ -41,6 +41,7 @@ fn test_fees_config(mempool_url: String, blockstream_url: String) -> FeesConfig 
 }
 
 #[tokio::test]
+#[ignore = "hits live external endpoint; run manually with --ignored"]
 async fn mempool_space() -> anyhow::Result<()> {
     let mempool_space_config = MempoolSpaceConfig::default();
     let mempool_space = MempoolSpaceClient::new(mempool_space_config);
@@ -50,6 +51,7 @@ async fn mempool_space() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "hits live external endpoint; run manually with --ignored"]
 async fn blockstream() -> anyhow::Result<()> {
     let blockstream_config = BlockstreamConfig::default();
     let blockstream = BlockstreamClient::new(blockstream_config);
@@ -87,6 +89,12 @@ async fn stale_cache_returned_when_both_providers_fail() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(path("/api/v1/fees/recommended"))
+        .respond_with(unparsable_response())
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/fee-estimates"))
         .respond_with(unparsable_response())
         .mount(&server)
         .await;
@@ -114,6 +122,12 @@ async fn stale_cache_not_used_when_disabled() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(path("/api/v1/fees/recommended"))
+        .respond_with(unparsable_response())
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/fee-estimates"))
         .respond_with(unparsable_response())
         .mount(&server)
         .await;
