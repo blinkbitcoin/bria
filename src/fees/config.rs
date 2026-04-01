@@ -33,7 +33,7 @@ impl Default for FeesConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct FeeCacheConfig {
+pub(super) struct FeeCacheConfig {
     pub cache_ttl: std::time::Duration,
     pub stale_ttl: std::time::Duration,
     pub enable_stale_on_error: bool,
