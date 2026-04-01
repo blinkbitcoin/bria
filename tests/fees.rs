@@ -12,9 +12,9 @@ fn mempool_fee_response() -> serde_json::Value {
     })
 }
 
-/// A 200 with an unparseable body makes the provider fail without triggering
+/// A 200 with an unparsable body makes the provider fail without triggering
 /// the retry middleware, keeping test behavior deterministic.
-fn unparseable_response() -> ResponseTemplate {
+fn unparsable_response() -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_string("invalid json")
 }
 
@@ -87,7 +87,7 @@ async fn stale_cache_returned_when_both_providers_fail() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .respond_with(unparseable_response())
+        .respond_with(unparsable_response())
         .mount(&server)
         .await;
 
@@ -114,7 +114,7 @@ async fn stale_cache_not_used_when_disabled() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .respond_with(unparseable_response())
+        .respond_with(unparsable_response())
         .mount(&server)
         .await;
 
