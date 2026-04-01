@@ -1,9 +1,5 @@
 use bdk::FeeRate;
-use governor::{
-    clock::DefaultClock,
-    state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
-};
+use governor::{Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -24,7 +20,6 @@ struct FeeEstimatesResponse {
 #[derive(Clone, Debug)]
 pub struct BlockstreamClient {
     config: BlockstreamConfig,
-    limiter: std::sync::Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     client: reqwest_middleware::ClientWithMiddleware,
 }
 
@@ -43,19 +38,18 @@ impl BlockstreamClient {
         let limiter = std::sync::Arc::new(RateLimiter::direct(
             Quota::per_second(rate_limit_per_second).allow_burst(rate_limit_burst),
         ));
-        let client = super::build_http_client(config.timeout, config.number_of_retries);
-
-        Self {
-            config,
+        let client = super::build_http_client(
+            config.timeout,
+            config.number_of_retries,
+            "blockstream",
             limiter,
-            client,
-        }
+        );
+
+        Self { config, client }
     }
 
     #[instrument(name = "blockstream.fee_rate", skip(self), ret, err)]
     pub async fn fee_rate(&self, priority: TxPriority) -> Result<FeeRate, FeeEstimationError> {
-        self.limiter.until_ready().await;
-
         let url = format!("{}{}", self.config.url, "/api/fee-estimates");
         let resp = self.client.get(&url).send().await?;
         let status = resp.status();

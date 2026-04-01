@@ -6,9 +6,35 @@ pub mod error;
 mod mempool_space;
 
 use bdk::bitcoin::{locktime::absolute::LockTime, Transaction, TxOut, Weight};
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed},
+    RateLimiter,
+};
 use std::collections::HashMap;
 
 use crate::primitives::*;
+
+pub(super) type SharedRateLimiter =
+    std::sync::Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>;
+
+#[derive(Clone)]
+struct RateLimitMiddleware {
+    limiter: SharedRateLimiter,
+}
+
+#[async_trait::async_trait]
+impl reqwest_middleware::Middleware for RateLimitMiddleware {
+    async fn handle(
+        &self,
+        req: reqwest::Request,
+        extensions: &mut http::Extensions,
+        next: reqwest_middleware::Next<'_>,
+    ) -> reqwest_middleware::Result<reqwest::Response> {
+        self.limiter.until_ready().await;
+        next.run(req, extensions).await
+    }
+}
 
 fn non_zero_rate_limit_value(
     configured_value: u32,
@@ -29,6 +55,8 @@ fn non_zero_rate_limit_value(
 fn build_http_client(
     timeout: std::time::Duration,
     max_retries: u32,
+    provider: &'static str,
+    limiter: SharedRateLimiter,
 ) -> reqwest_middleware::ClientWithMiddleware {
     let retry_policy = reqwest_retry::policies::ExponentialBackoff::builder()
         .retry_bounds(
@@ -36,16 +64,34 @@ fn build_http_client(
             std::time::Duration::from_secs(30 * 60),
         )
         .build_with_max_retries(max_retries);
-    reqwest_middleware::ClientBuilder::new(
-        reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .expect("could not build reqwest client"),
-    )
-    .with(reqwest_retry::RetryTransientMiddleware::new_with_policy(
-        retry_policy,
-    ))
-    .build()
+    let reqwest_client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|err| {
+            tracing::error!(
+                provider,
+                timeout_seconds = timeout.as_secs_f64(),
+                max_retries,
+                error = %err,
+                "failed to build reqwest client"
+            );
+            panic!(
+                "failed to build reqwest client for provider {provider} (timeout={:?}, max_retries={}): {}",
+                timeout,
+                max_retries,
+                err
+            );
+        });
+
+    // Middleware executes outer-to-inner: Retry → RateLimit → HTTP client.
+    // This means each retry attempt also passes through the rate limiter,
+    // ensuring retries respect API rate limits and avoid provider bans.
+    reqwest_middleware::ClientBuilder::new(reqwest_client)
+        .with(reqwest_retry::RetryTransientMiddleware::new_with_policy(
+            retry_policy,
+        ))
+        .with(RateLimitMiddleware { limiter })
+        .build()
 }
 
 pub use blockstream::*;

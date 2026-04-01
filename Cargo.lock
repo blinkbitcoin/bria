@@ -502,6 +502,7 @@ dependencies = [
  "futures",
  "governor",
  "hex",
+ "http 1.4.0",
  "miniscript",
  "opentelemetry",
  "opentelemetry-otlp",

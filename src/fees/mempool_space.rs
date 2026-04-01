@@ -1,9 +1,5 @@
 use bdk::FeeRate;
-use governor::{
-    clock::DefaultClock,
-    state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
-};
+use governor::{Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -23,7 +19,6 @@ struct RecommendedFeesResponse {
 #[derive(Clone, Debug)]
 pub struct MempoolSpaceClient {
     config: MempoolSpaceConfig,
-    limiter: std::sync::Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     client: reqwest_middleware::ClientWithMiddleware,
 }
 
@@ -42,19 +37,18 @@ impl MempoolSpaceClient {
         let limiter = std::sync::Arc::new(RateLimiter::direct(
             Quota::per_second(rate_limit_per_second).allow_burst(rate_limit_burst),
         ));
-        let client = super::build_http_client(config.timeout, config.number_of_retries);
-
-        Self {
-            config,
+        let client = super::build_http_client(
+            config.timeout,
+            config.number_of_retries,
+            "mempool_space",
             limiter,
-            client,
-        }
+        );
+
+        Self { config, client }
     }
 
     #[instrument(name = "mempool_space.fee_rate", skip(self), ret, err)]
     pub async fn fee_rate(&self, priority: TxPriority) -> Result<FeeRate, FeeEstimationError> {
-        self.limiter.until_ready().await;
-
         let url = format!("{}{}", self.config.url, "/api/v1/fees/recommended");
         let resp = self.client.get(&url).send().await?;
         let status = resp.status();
