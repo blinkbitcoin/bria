@@ -10,6 +10,44 @@ use std::collections::HashMap;
 
 use crate::primitives::*;
 
+fn non_zero_rate_limit_value(
+    configured_value: u32,
+    provider: &'static str,
+    field: &'static str,
+) -> std::num::NonZeroU32 {
+    std::num::NonZeroU32::new(configured_value).unwrap_or_else(|| {
+        tracing::warn!(
+            provider,
+            field,
+            configured_value,
+            "invalid zero rate-limit config value; defaulting to 1"
+        );
+        std::num::NonZeroU32::MIN
+    })
+}
+
+fn build_http_client(
+    timeout: std::time::Duration,
+    max_retries: u32,
+) -> reqwest_middleware::ClientWithMiddleware {
+    let retry_policy = reqwest_retry::policies::ExponentialBackoff::builder()
+        .retry_bounds(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(30 * 60),
+        )
+        .build_with_max_retries(max_retries);
+    reqwest_middleware::ClientBuilder::new(
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("could not build reqwest client"),
+    )
+    .with(reqwest_retry::RetryTransientMiddleware::new_with_policy(
+        retry_policy,
+    ))
+    .build()
+}
+
 pub use blockstream::*;
 pub use client::*;
 pub use config::*;
