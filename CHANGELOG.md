@@ -1,3 +1,10 @@
+# [bria release v0.1.130](https://github.com/blinkbitcoin/bria/releases/tag/0.1.130)
+
+
+### Bug Fixes
+
+- Add rate limiting and cached fee fallback (#42)
+
 # [bria release v0.1.129](https://github.com/blinkbitcoin/bria/releases/tag/0.1.129)
 
 
