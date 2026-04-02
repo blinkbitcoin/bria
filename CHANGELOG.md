@@ -1,3 +1,10 @@
+# [bria release v0.1.131](https://github.com/blinkbitcoin/bria/releases/tag/0.1.131)
+
+
+### Bug Fixes
+
+- Use blink bdk v0.30.3 for sync cache growth (#43)
+
 # [bria release v0.1.130](https://github.com/blinkbitcoin/bria/releases/tag/0.1.130)
 
 
