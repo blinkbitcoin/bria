@@ -52,6 +52,7 @@ impl<'a> JobExecutor<'a> {
 
     #[instrument(name = "execute_job", skip_all, fields(
             job_id, job_name, checkpoint_json, attempt, last_attempt,
+            execution_duration_ms,
             error, error.level, error.message
     ), err)]
     pub async fn execute<T, E, R, F>(mut self, func: F) -> Result<T, E>
@@ -65,7 +66,12 @@ impl<'a> JobExecutor<'a> {
         let keep_alive_handle = self.spawn_keep_alive(data.job_meta.wait_till_next_attempt);
 
         let completed = self.checkpoint_attempt(&mut data).await?;
+        let started_at = std::time::Instant::now();
         let result = func(data.data).await;
+        Span::current().record(
+            "execution_duration_ms",
+            started_at.elapsed().as_millis() as u64,
+        );
 
         keep_alive_handle.stop().await;
 

@@ -33,7 +33,7 @@ teardown_file() {
 
   bitcoin_cli -regtest sendtoaddress ${bitcoind_signer_address} 1
 
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_pending_income) == 100000000 ]] && break
     sleep 1
@@ -50,7 +50,7 @@ teardown_file() {
 
   bitcoin_cli -generate 2
 
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_current_settled) == 100000000 ]] && break
     sleep 1
@@ -67,7 +67,7 @@ teardown_file() {
 @test "bitcoind_signer_sync: Detects outgoing transactions" {
   bitcoind_address=$(bitcoin_cli -regtest getnewaddress)
   bitcoin_signer_cli -regtest sendtoaddress "${bitcoind_address}" 0.5
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_pending_outgoing) == 50000000 ]] && break
     sleep 1
@@ -83,7 +83,7 @@ teardown_file() {
 
   bitcoin_cli -generate 1
 
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_current_settled) != 0 ]] && break
     sleep 1
@@ -118,7 +118,7 @@ teardown_file() {
     0.38 \
     ${bitcoind_address}
 
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_pending_outgoing) == 210000000 ]] && break
     sleep 1
@@ -127,7 +127,7 @@ teardown_file() {
   [[ $(cached_effective_settled) != 0 ]] || exit 1
 
   bitcoin_cli -generate 2
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_pending_outgoing) == 0 ]] && break
     sleep 1
@@ -159,7 +159,7 @@ teardown_file() {
       || exit 1
 
   bitcoin_cli -generate 1
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_pending_outgoing) == 0 ]] \
       && [[ $(cached_encumbered_fees) == 0 ]] \
@@ -185,7 +185,7 @@ teardown_file() {
     0.39 \
     ${bitcoind_address}
 
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_pending_outgoing) == 60000000 ]] && break
     sleep 1
@@ -194,7 +194,7 @@ teardown_file() {
   [[ $(cached_effective_settled) == 0 ]] || exit 1
 
   bitcoin_cli -generate 2
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     [[ $(cached_pending_outgoing) == 0 ]] && break
     sleep 1

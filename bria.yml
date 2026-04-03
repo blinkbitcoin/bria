@@ -5,10 +5,13 @@
 #   process_all_payout_queues_delay: 2
 #   respawn_all_outbox_handlers_delay: 5
 #   runners:
-#     account_main:
+#     payout:
 #       min_concurrency: 6
 #       max_concurrency: 10
-#     critical:
+#     wallet_sync:
+#       min_concurrency: 2
+#       max_concurrency: 4
+#     batch_finalization:
 #       min_concurrency: 6
 #       max_concurrency: 10
 #     maintenance:

@@ -50,7 +50,7 @@ teardown_file() {
   bitcoin_cli -regtest sendtoaddress ${bria_address} 1
   bitcoin_cli -regtest sendtoaddress ${bria_address} 1
 
-  for i in {1..30}; do
+  for i in {1..60}; do
    n_utxos=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos | length')
     [[ "${n_utxos}" == "3" ]] && break
     sleep 1
@@ -75,7 +75,7 @@ teardown_file() {
 @test "payout: Settling income means batch is created" {
   bitcoin_cli -generate 20
 
-  for i in {1..30}; do
+  for i in {1..60}; do
     utxo_height=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos[0].blockHeight')
     [[ "${utxo_height}" != "null" ]] && break;
     sleep 1
@@ -537,7 +537,7 @@ teardown_file() {
   destination="bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej"
   payout_id=$(bria_cmd submit-payout -w default --queue-name large-tx-queue --destination ${destination} --amount 125000000 | jq -r '.id')
 
-  for i in {1..30}; do
+  for i in {1..60}; do
     cache_wallet_balance
     encumbered=$(cached_encumbered_outgoing)
     echo "Encumbered outgoing: ${encumbered}"

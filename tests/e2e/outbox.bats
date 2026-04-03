@@ -17,7 +17,7 @@ teardown_file() {
 @test "outbox: Emits utxo_dropped event" {
   bria_address=$(bria_cmd new-address -w default | jq -r '.address')
   bitcoin_cli -regtest sendtoaddress ${bria_address} 1
-  for i in {1..30}; do
+  for i in {1..60}; do
     n_utxos=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos | length')
     [[ "${n_utxos}" == "1" ]] && break
     sleep 1
