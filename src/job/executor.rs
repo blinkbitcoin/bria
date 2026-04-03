@@ -70,7 +70,7 @@ impl<'a> JobExecutor<'a> {
         let result = func(data.data).await;
         Span::current().record(
             "execution_duration_ms",
-            tracing::field::display(started_at.elapsed().as_millis()),
+            started_at.elapsed().as_millis() as u64,
         );
 
         keep_alive_handle.stop().await;
