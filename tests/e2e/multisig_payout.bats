@@ -41,8 +41,8 @@ teardown_file() {
   bitcoin_cli -regtest sendtoaddress ${bitcoind_signer_address} 1
 
   for i in {1..60}; do
-  n_change_utxos=$(bria_cmd list-utxos -w multisig | jq '.keychains[0].utxos | map(select(.changeOutput == true)) | length')
-    [[ "${n_utxos}" == "1" ]] && break
+    n_change_utxos=$(bria_cmd list-utxos -w multisig | jq '.keychains[0].utxos | map(select(.changeOutput == true)) | length')
+    [[ "${n_change_utxos}" == "1" ]] && break
     sleep 1
   done
 
