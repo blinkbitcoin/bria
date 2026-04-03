@@ -38,8 +38,9 @@ const RESPAWN_ALL_OUTBOX_ID: Uuid = uuid!("00000000-0000-0000-0000-000000000003"
 pub struct JobRunners {
     // These handles are intentionally retained for process lifetime so each
     // runner task keeps running until the app shuts down.
-    pub account_main: JobRunnerHandle,
-    pub critical: JobRunnerHandle,
+    pub payout: JobRunnerHandle,
+    pub wallet_sync: JobRunnerHandle,
+    pub batch_finalization: JobRunnerHandle,
     pub maintenance: JobRunnerHandle,
 }
 
@@ -63,7 +64,7 @@ pub async fn start_job_runners(
 ) -> Result<JobRunners, JobError> {
     let runner_config = config.runners.clone();
 
-    let account_main_registry = build_job_registry(
+    let payout_registry = build_job_registry(
         config.clone(),
         blockchain_cfg.clone(),
         outbox.clone(),
@@ -80,20 +81,19 @@ pub async fn start_job_runners(
         fees_client.clone(),
     );
 
-    let account_main_concurrency =
-        normalize_concurrency("account_main", runner_config.account_main);
-    let account_main = account_main_registry
+    let payout_concurrency = normalize_concurrency("payout", runner_config.payout);
+    let payout = payout_registry
         .runner(pool)
-        .set_channel_names(&["account_main"])
+        .set_channel_names(&["payout"])
         .set_concurrency(
-            account_main_concurrency.min_concurrency,
-            account_main_concurrency.max_concurrency,
+            payout_concurrency.min_concurrency,
+            payout_concurrency.max_concurrency,
         )
         .set_keep_alive(false)
         .run()
         .await?;
 
-    let critical_registry = build_job_registry(
+    let wallet_sync_registry = build_job_registry(
         config.clone(),
         blockchain_cfg.clone(),
         outbox.clone(),
@@ -110,13 +110,43 @@ pub async fn start_job_runners(
         fees_client.clone(),
     );
 
-    let critical_concurrency = normalize_concurrency("critical", runner_config.critical);
-    let critical = critical_registry
+    let wallet_sync_concurrency = normalize_concurrency("wallet_sync", runner_config.wallet_sync);
+    let wallet_sync = wallet_sync_registry
+        .runner(pool)
+        .set_channel_names(&["wallet_sync"])
+        .set_concurrency(
+            wallet_sync_concurrency.min_concurrency,
+            wallet_sync_concurrency.max_concurrency,
+        )
+        .set_keep_alive(false)
+        .run()
+        .await?;
+
+    let batch_finalization_registry = build_job_registry(
+        config.clone(),
+        blockchain_cfg.clone(),
+        outbox.clone(),
+        wallets.clone(),
+        xpubs.clone(),
+        payout_queues.clone(),
+        batches.clone(),
+        signing_sessions.clone(),
+        payouts.clone(),
+        ledger.clone(),
+        utxos.clone(),
+        addresses.clone(),
+        signer_encryption_config.clone(),
+        fees_client.clone(),
+    );
+
+    let batch_finalization_concurrency =
+        normalize_concurrency("batch_finalization", runner_config.batch_finalization);
+    let batch_finalization = batch_finalization_registry
         .runner(pool)
         .set_channel_names(&["wallet_accounting", "batch_signing", "batch_broadcasting"])
         .set_concurrency(
-            critical_concurrency.min_concurrency,
-            critical_concurrency.max_concurrency,
+            batch_finalization_concurrency.min_concurrency,
+            batch_finalization_concurrency.max_concurrency,
         )
         .set_keep_alive(false)
         .run()
@@ -158,8 +188,9 @@ pub async fn start_job_runners(
         .await?;
 
     Ok(JobRunners {
-        account_main,
-        critical,
+        payout,
+        wallet_sync,
+        batch_finalization,
         maintenance,
     })
 }
@@ -380,7 +411,7 @@ pub async fn spawn_process_payout_queue(
     data: impl Into<ProcessPayoutQueueData>,
 ) -> Result<ProcessPayoutQueueData, JobError> {
     let data = data.into();
-    onto_account_main_channel(
+    onto_payout_channel(
         pool,
         data.account_id,
         Uuid::new_v4(),
@@ -572,7 +603,7 @@ pub async fn spawn_sync_all_wallets(
 
 #[instrument(name = "job.spawn_sync_wallet", skip_all, fields(error, error.level, error.message), err)]
 async fn spawn_sync_wallet(pool: &sqlx::PgPool, data: SyncWalletData) -> Result<(), JobError> {
-    onto_account_main_channel(pool, data.account_id, data.wallet_id, "sync_wallet", data).await?;
+    onto_wallet_sync_channel(pool, data.wallet_id, data.wallet_id, "sync_wallet", data).await?;
     Ok(())
 }
 
@@ -765,9 +796,9 @@ fn schedule_payout_queue_channel_arg(payout_queue_id: PayoutQueueId) -> String {
     format!("payout_queue_id:{payout_queue_id}")
 }
 
-async fn onto_account_main_channel<D: serde::Serialize>(
+async fn onto_wallet_sync_channel<D: serde::Serialize>(
     pool: &sqlx::PgPool,
-    account_id: AccountId,
+    wallet_id: WalletId,
     uuid: impl Into<Uuid>,
     name: &str,
     data: D,
@@ -777,8 +808,8 @@ async fn onto_account_main_channel<D: serde::Serialize>(
         match JobBuilder::new_with_id(uuid, name)
             .set_ordered(true)
             .set_retry_backoff(std::time::Duration::from_secs(2))
-            .set_channel_name("account_main")
-            .set_channel_args(&account_main_channel_arg(account_id))
+            .set_channel_name("wallet_sync")
+            .set_channel_args(&wallet_sync_channel_arg(wallet_id))
             .set_json(&data)
             .expect("Couldn't set json")
             .spawn(pool)
@@ -800,8 +831,47 @@ async fn onto_account_main_channel<D: serde::Serialize>(
     }
 }
 
-fn account_main_channel_arg(account_id: AccountId) -> String {
+async fn onto_payout_channel<D: serde::Serialize>(
+    pool: &sqlx::PgPool,
+    account_id: AccountId,
+    uuid: impl Into<Uuid>,
+    name: &str,
+    data: D,
+) -> Result<D, JobError> {
+    let uuid = uuid.into();
+    loop {
+        match JobBuilder::new_with_id(uuid, name)
+            .set_ordered(true)
+            .set_retry_backoff(std::time::Duration::from_secs(2))
+            .set_channel_name("payout")
+            .set_channel_args(&payout_channel_arg(account_id))
+            .set_json(&data)
+            .expect("Couldn't set json")
+            .spawn(pool)
+            .await
+        {
+            Err(sqlx::Error::Database(err)) if err.message().contains("duplicate key") => {
+                return Ok(data)
+            }
+            Err(sqlx::Error::Database(err)) if err.message().contains("after_message_id_fkey") => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(e) => {
+                crate::tracing::insert_error_fields(tracing::Level::ERROR, &e);
+                return Err(JobError::from(e));
+            }
+            Ok(_) => return Ok(data),
+        }
+    }
+}
+
+fn payout_channel_arg(account_id: AccountId) -> String {
     format!("account_id:{account_id}")
+}
+
+fn wallet_sync_channel_arg(wallet_id: WalletId) -> String {
+    format!("wallet_id:{wallet_id}")
 }
 
 #[cfg(test)]

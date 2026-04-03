@@ -52,6 +52,7 @@ impl<'a> JobExecutor<'a> {
 
     #[instrument(name = "execute_job", skip_all, fields(
             job_id, job_name, checkpoint_json, attempt, last_attempt,
+            queue_wait_ms, execution_duration_ms,
             error, error.level, error.message
     ), err)]
     pub async fn execute<T, E, R, F>(mut self, func: F) -> Result<T, E>
@@ -61,11 +62,17 @@ impl<'a> JobExecutor<'a> {
         R: std::future::Future<Output = Result<T, E>>,
         F: FnOnce(Option<T>) -> R,
     {
+        self.record_queue_wait().await;
         let mut data = JobData::<T>::from_raw_payload(self.job.raw_json()).unwrap();
         let keep_alive_handle = self.spawn_keep_alive(data.job_meta.wait_till_next_attempt);
 
         let completed = self.checkpoint_attempt(&mut data).await?;
+        let started_at = std::time::Instant::now();
         let result = func(data.data).await;
+        Span::current().record(
+            "execution_duration_ms",
+            tracing::field::display(started_at.elapsed().as_millis()),
+        );
 
         keep_alive_handle.stop().await;
 
@@ -75,6 +82,21 @@ impl<'a> JobExecutor<'a> {
             self.job.complete().await?;
         }
         result
+    }
+
+    async fn record_queue_wait(&self) {
+        let queue_wait_ms = sqlx::query_scalar::<_, i64>(
+            "SELECT GREATEST(0, ((EXTRACT(EPOCH FROM (now() - COALESCE(attempt_at, created_at))) * 1000)::BIGINT)) FROM mq_msgs WHERE id = $1",
+        )
+            .bind(self.job.id())
+            .fetch_optional(self.job.pool())
+            .await;
+
+        let Ok(Some(queue_wait_ms)) = queue_wait_ms else {
+            return;
+        };
+
+        Span::current().record("queue_wait_ms", tracing::field::display(queue_wait_ms));
     }
 
     fn spawn_keep_alive(&self, mut interval: Duration) -> KeepAliveHandle {

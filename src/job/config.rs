@@ -22,9 +22,11 @@ pub struct JobsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunnersConfig {
     #[serde(default = "default_runner_concurrency")]
-    pub account_main: JobRunnerConcurrencyConfig,
+    pub payout: JobRunnerConcurrencyConfig,
+    #[serde(default = "default_wallet_sync_runner")]
+    pub wallet_sync: JobRunnerConcurrencyConfig,
     #[serde(default = "default_runner_concurrency")]
-    pub critical: JobRunnerConcurrencyConfig,
+    pub batch_finalization: JobRunnerConcurrencyConfig,
     #[serde(default = "default_maintenance_runner")]
     pub maintenance: JobRunnerConcurrencyConfig,
 }
@@ -64,8 +66,9 @@ impl Default for JobsConfig {
 impl Default for JobRunnersConfig {
     fn default() -> Self {
         Self {
-            account_main: default_runner_concurrency(),
-            critical: default_runner_concurrency(),
+            payout: default_runner_concurrency(),
+            wallet_sync: default_wallet_sync_runner(),
+            batch_finalization: default_runner_concurrency(),
             maintenance: default_maintenance_runner(),
         }
     }
@@ -130,6 +133,13 @@ fn default_runner_concurrency() -> JobRunnerConcurrencyConfig {
 }
 
 fn default_maintenance_runner() -> JobRunnerConcurrencyConfig {
+    JobRunnerConcurrencyConfig {
+        min_concurrency: 2,
+        max_concurrency: 4,
+    }
+}
+
+fn default_wallet_sync_runner() -> JobRunnerConcurrencyConfig {
     JobRunnerConcurrencyConfig {
         min_concurrency: 2,
         max_concurrency: 4,
