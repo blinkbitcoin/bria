@@ -20,6 +20,7 @@ pub struct JobsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobRunnersConfig {
     #[serde(default = "default_runner_concurrency")]
     pub payout: JobRunnerConcurrencyConfig,
