@@ -33,6 +33,15 @@
           rustToolchain
           protobuf
         ];
+      batsLatest = pkgs.bats.overrideAttrs (_old: {
+        version = "1.13.0";
+        src = pkgs.fetchFromGitHub {
+          owner = "bats-core";
+          repo = "bats-core";
+          rev = "v1.13.0";
+          sha256 = "145s0ca5vy3bs50hvkk1qkbi8hdiyvc7jp2rmnyvnjihdsdq2p1n";
+        };
+      });
       devEnvVars = rec {
         PGDATABASE = "pg";
         PGUSER = "user";
@@ -55,7 +64,7 @@
               cargo-watch
               postgresql
               docker-compose
-              bats
+              batsLatest
               jq
             ];
             shellHook = ''

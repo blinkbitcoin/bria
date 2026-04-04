@@ -85,7 +85,7 @@ To run commands in the [Nix](https://github.com/DeterminateSystems/nix-installer
 
 #### End-to-end tests
 
-- for bash-based end-to-end tests, we use [bats](https://bats-core.readthedocs.io/en/stable/) as a test runner. To execute these tests, run:
+- for bash-based end-to-end tests, we use [bats](https://bats-core.readthedocs.io/en/stable/) as a test runner. To execute these tests with fail-fast behavior (`--abort`), run:
     ```bash
     make e2e
     ```

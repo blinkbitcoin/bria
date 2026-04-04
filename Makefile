@@ -47,7 +47,7 @@ test-in-ci: clean-deps build start-deps
 e2e-tests-in-container:
 	git config --global --add safe.directory /repo # otherwise bats complains
 	SQLX_OFFLINE=true cargo build --locked
-	bats -t tests/e2e
+	bats --abort -t tests/e2e
 
 e2e: clean-deps build start-deps
-	bats -t tests/e2e
+	bats --abort -t tests/e2e
