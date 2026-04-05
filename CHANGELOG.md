@@ -1,3 +1,14 @@
+# [bria release v0.1.132](https://github.com/blinkbitcoin/bria/releases/tag/0.1.132)
+
+
+### Features
+
+- Isolate wallet sync into dedicated job channel (#44)
+
+### Miscellaneous Tasks
+
+- Bump bats to v1.13 (#45)
+
 # [bria release v0.1.131](https://github.com/blinkbitcoin/bria/releases/tag/0.1.131)
 
 
