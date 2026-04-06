@@ -110,27 +110,53 @@ pub async fn execute(
         span.record("current_height", current_height);
         let latest_change_settle_height = wallet.config.latest_change_settle_height(current_height);
         let sync_start = tokio::time::Instant::now();
-        let bdk_sync_outcome =
-            tokio::time::timeout(BDK_SYNC_HARD_TIMEOUT, keychain_wallet.sync(blockchain)).await;
-        let sync_elapsed = sync_start.elapsed();
-        if sync_elapsed >= BDK_SYNC_WARN_AFTER {
-            tracing::warn!(
-                wallet_id = %data.wallet_id,
-                keychain_id = %keychain_id,
-                elapsed_secs = sync_elapsed.as_secs(),
-                warn_after_secs = BDK_SYNC_WARN_AFTER.as_secs(),
-                "bdk sync exceeded warning threshold"
-            );
-        }
-        match bdk_sync_outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                return Err(JobError::BdkSyncTimeout {
-                    timeout_secs: BDK_SYNC_HARD_TIMEOUT.as_secs(),
-                    wallet_id: data.wallet_id.to_string(),
-                    keychain_id: keychain_id.to_string(),
-                })
+        let sync_fut = keychain_wallet.sync(blockchain);
+        tokio::pin!(sync_fut);
+
+        let warn_timer = tokio::time::sleep(BDK_SYNC_WARN_AFTER);
+        tokio::pin!(warn_timer);
+
+        let hard_timer = tokio::time::sleep(BDK_SYNC_HARD_TIMEOUT);
+        tokio::pin!(hard_timer);
+
+        let mut warned = false;
+        let mut hard_threshold_reached = false;
+
+        loop {
+            tokio::select! {
+                res = &mut sync_fut => {
+                    if hard_threshold_reached {
+                        tracing::info!(
+                            wallet_id = %data.wallet_id,
+                            keychain_id = %keychain_id,
+                            elapsed_secs = sync_start.elapsed().as_secs(),
+                            hard_timeout_secs = BDK_SYNC_HARD_TIMEOUT.as_secs(),
+                            "bdk sync finished after hard-timeout threshold"
+                        );
+                    }
+                    res?;
+                    break;
+                }
+                _ = &mut warn_timer, if !warned => {
+                    warned = true;
+                    tracing::warn!(
+                        wallet_id = %data.wallet_id,
+                        keychain_id = %keychain_id,
+                        elapsed_secs = sync_start.elapsed().as_secs(),
+                        warn_after_secs = BDK_SYNC_WARN_AFTER.as_secs(),
+                        "bdk sync exceeded warning threshold"
+                    );
+                }
+                _ = &mut hard_timer, if !hard_threshold_reached => {
+                    hard_threshold_reached = true;
+                    tracing::error!(
+                        wallet_id = %data.wallet_id,
+                        keychain_id = %keychain_id,
+                        elapsed_secs = sync_start.elapsed().as_secs(),
+                        hard_timeout_secs = BDK_SYNC_HARD_TIMEOUT.as_secs(),
+                        "bdk sync exceeded hard-timeout threshold; waiting for sync completion"
+                    );
+                }
             }
         }
         let bdk_txs = Transactions::new(keychain_id, pool.clone());
