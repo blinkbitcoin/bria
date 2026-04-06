@@ -19,6 +19,10 @@ use crate::{
     wallet::*,
 };
 use std::collections::HashMap;
+use std::time::Duration;
+
+const BDK_SYNC_WARN_AFTER: Duration = Duration::from_secs(20 * 60);
+const BDK_SYNC_HARD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncWalletData {
@@ -105,7 +109,30 @@ pub async fn execute(
         let (blockchain, current_height) = init_electrum(&deps.blockchain_cfg.electrum_url).await?;
         span.record("current_height", current_height);
         let latest_change_settle_height = wallet.config.latest_change_settle_height(current_height);
-        keychain_wallet.sync(blockchain).await?;
+        let sync_start = tokio::time::Instant::now();
+        let bdk_sync_outcome =
+            tokio::time::timeout(BDK_SYNC_HARD_TIMEOUT, keychain_wallet.sync(blockchain)).await;
+        let sync_elapsed = sync_start.elapsed();
+        if sync_elapsed >= BDK_SYNC_WARN_AFTER {
+            tracing::warn!(
+                wallet_id = %data.wallet_id,
+                keychain_id = %keychain_id,
+                elapsed_secs = sync_elapsed.as_secs(),
+                warn_after_secs = BDK_SYNC_WARN_AFTER.as_secs(),
+                "bdk sync exceeded warning threshold"
+            );
+        }
+        match bdk_sync_outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                return Err(JobError::BdkSyncTimeout {
+                    timeout_secs: BDK_SYNC_HARD_TIMEOUT.as_secs(),
+                    wallet_id: data.wallet_id.to_string(),
+                    keychain_id: keychain_id.to_string(),
+                })
+            }
+        }
         let bdk_txs = Transactions::new(keychain_id, pool.clone());
         let bdk_utxos = BdkUtxos::new(keychain_id, pool.clone());
         let mut txs_to_skip = Vec::new();

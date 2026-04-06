@@ -278,7 +278,16 @@ async fn sync_all_wallets(
         .expect("couldn't build JobExecutor")
         .execute(|_| async move {
             for (account_id, wallet_id) in wallets.all_ids().await? {
-                let _ = spawn_sync_wallet(&pool, SyncWalletData::new(account_id, wallet_id)).await;
+                if let Err(err) =
+                    spawn_sync_wallet(&pool, SyncWalletData::new(account_id, wallet_id)).await
+                {
+                    tracing::error!(
+                        account_id = %account_id,
+                        wallet_id = %wallet_id,
+                        error = %err,
+                        "failed to spawn sync_wallet"
+                    );
+                }
             }
             Ok::<(), JobError>(())
         })

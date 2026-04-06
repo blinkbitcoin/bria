@@ -58,6 +58,14 @@ pub enum JobError {
     PsbtMissingInSigningSessions,
     #[error("JobError - psbt::Error: {0}")]
     PsbtError(#[from] psbt::Error),
+    #[error(
+        "JobError - sync_wallet bdk sync timed out after {timeout_secs}s for wallet_id={wallet_id} keychain_id={keychain_id}"
+    )]
+    BdkSyncTimeout {
+        timeout_secs: u64,
+        wallet_id: String,
+        keychain_id: String,
+    },
 }
 
 impl JobExecutionError for JobError {}
