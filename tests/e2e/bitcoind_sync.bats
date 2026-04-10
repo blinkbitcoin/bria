@@ -256,6 +256,8 @@ teardown_file() {
   reserved_txid=${reserved_outpoint%:*}
   reserved_vout=${reserved_outpoint#*:}
   docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -c "DELETE FROM bria_utxos WHERE tx_id = '${reserved_txid}' AND vout = ${reserved_vout}" > /dev/null
+  bria_utxo_exists=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT COUNT(*) FROM bria_utxos WHERE tx_id = '${reserved_txid}' AND vout = ${reserved_vout}" | tr -d '[:space:]')
+  [[ "${bria_utxo_exists}" -eq 0 ]] || exit 1
 
   bdk_copy_exists=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT COUNT(*) FROM bdk_utxos WHERE tx_id = '${reserved_txid}' AND vout = ${reserved_vout}" | tr -d '[:space:]')
   [[ "${bdk_copy_exists}" -ge 1 ]] || exit 1
