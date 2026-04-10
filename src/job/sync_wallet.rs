@@ -80,7 +80,6 @@ struct KeychainSyncContext<'a> {
 }
 
 enum SpendInputState {
-    NotSpend,
     CompleteInputs {
         income_bria_utxos: Vec<WalletUtxo>,
     },
@@ -199,27 +198,30 @@ async fn process_unsynced_txs(
             None
         };
 
-        let spend_input_state = spend_input_state(ctx, &input_outpoints).await?;
-        let income_bria_utxos = match spend_input_state {
-            SpendInputState::NotSpend => Vec::new(),
-            SpendInputState::CompleteInputs { income_bria_utxos } => income_bria_utxos,
-            SpendInputState::MissingInputs {
-                expected,
-                found,
-                missing_outpoints,
-            } => {
-                warn!(
-                    message = "spend_inputs_missing",
-                    wallet_id = %ctx.wallet.id,
-                    keychain_id = %ctx.keychain_id,
-                    tx_id = %unsynced_tx.tx_id,
+        let income_bria_utxos = if is_spend_tx {
+            let spend_input_state = spend_input_state(ctx, &input_outpoints).await?;
+            match spend_input_state {
+                SpendInputState::CompleteInputs { income_bria_utxos } => income_bria_utxos,
+                SpendInputState::MissingInputs {
                     expected,
                     found,
-                    ?missing_outpoints,
-                );
-                txs_to_skip.push(unsynced_tx.tx_id.to_string());
-                continue;
+                    missing_outpoints,
+                } => {
+                    warn!(
+                        message = "spend_inputs_missing",
+                        wallet_id = %ctx.wallet.id,
+                        keychain_id = %ctx.keychain_id,
+                        tx_id = %unsynced_tx.tx_id,
+                        expected,
+                        found,
+                        ?missing_outpoints,
+                    );
+                    txs_to_skip.push(unsynced_tx.tx_id.to_string());
+                    continue;
+                }
             }
+        } else {
+            Vec::new()
         };
         txs_to_skip.clear();
 
@@ -528,8 +530,12 @@ async fn process_spend_tx(
                     },
                 )
                 .await?;
+
+            return Ok(());
         }
     }
+
+    tx.commit().await?;
 
     Ok(())
 }
@@ -568,10 +574,6 @@ async fn spend_input_state(
     ctx: &KeychainSyncContext<'_>,
     input_outpoints: &[bitcoin::OutPoint],
 ) -> Result<SpendInputState, JobError> {
-    if input_outpoints.is_empty() {
-        return Ok(SpendInputState::NotSpend);
-    }
-
     let utxos_by_keychain = HashMap::from([(ctx.keychain_id, input_outpoints.to_vec())]);
     let found = ctx
         .deps

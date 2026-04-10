@@ -275,10 +275,10 @@ teardown_file() {
 
   for i in {1..60}; do
     synced_flag=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT synced_to_bria::int FROM bdk_transactions WHERE tx_id = '${payout_tx_id}' ORDER BY modified_at DESC LIMIT 1" | tr -d '[:space:]')
-    [[ "${synced_flag}" == "0" ]] && break
+    [[ -n "${synced_flag}" && "${synced_flag}" == "0" ]] && break
     sleep 1
   done
-  [[ "${synced_flag}" == "0" ]] || exit 1
+  [[ -n "${synced_flag}" && "${synced_flag}" == "0" ]] || exit 1
 
   for i in {1..60}; do
     broadcast_ledger_id=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT batch_broadcast_ledger_tx_id::text FROM bria_batch_wallet_summaries WHERE batch_id = '${batch_id}' LIMIT 1" | tr -d '[:space:]')

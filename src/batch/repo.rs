@@ -13,6 +13,8 @@ pub struct BatchInfo {
     pub created_ledger_tx_id: LedgerTxId,
 }
 
+pub type BatchBroadcastLedgerTx<'a> = (Transaction<'a, Postgres>, BatchInfo, LedgerTxId, bool);
+
 #[derive(Debug, Clone)]
 pub struct Batches {
     pool: PgPool,
@@ -255,7 +257,7 @@ impl Batches {
         &self,
         bitcoin_tx_id: bitcoin::Txid,
         wallet_id: WalletId,
-    ) -> Result<Option<(Transaction<'_, Postgres>, BatchInfo, LedgerTxId, bool)>, BatchError> {
+    ) -> Result<Option<BatchBroadcastLedgerTx<'_>>, BatchError> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query!(
             r#"WITH b AS (
