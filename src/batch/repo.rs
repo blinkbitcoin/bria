@@ -255,7 +255,7 @@ impl Batches {
         &self,
         bitcoin_tx_id: bitcoin::Txid,
         wallet_id: WalletId,
-    ) -> Result<Option<(Transaction<'_, Postgres>, BatchInfo, LedgerTxId)>, BatchError> {
+    ) -> Result<Option<(Transaction<'_, Postgres>, BatchInfo, LedgerTxId, bool)>, BatchError> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query!(
             r#"WITH b AS (
@@ -292,6 +292,7 @@ impl Batches {
                     created_ledger_tx_id,
                 },
                 LedgerTxId::from(ledger_id),
+                false,
             )));
         }
         let ledger_transaction_id = LedgerTxId::new();
@@ -315,6 +316,7 @@ impl Batches {
                 created_ledger_tx_id,
             },
             ledger_transaction_id,
+            true,
         )))
     }
 

@@ -199,7 +199,7 @@ async fn process_unsynced_txs(
             None
         };
 
-        let spend_input_state = spend_input_state(ctx, &unsynced_tx, &input_outpoints).await?;
+        let spend_input_state = spend_input_state(ctx, &input_outpoints).await?;
         let income_bria_utxos = match spend_input_state {
             SpendInputState::NotSpend => Vec::new(),
             SpendInputState::CompleteInputs { income_bria_utxos } => income_bria_utxos,
@@ -538,11 +538,15 @@ async fn maybe_record_batch_broadcast(
     ctx: &KeychainSyncContext<'_>,
     unsynced_tx: &UnsyncedTransaction,
 ) -> Result<Option<(BatchInfo, LedgerTransactionId)>, JobError> {
-    if let Some((tx, batch_info, tx_id)) = ctx
+    let Some((tx, batch_info, tx_id, was_newly_set)) = ctx
         .batches
         .set_batch_broadcast_ledger_tx_id(unsynced_tx.tx_id, ctx.wallet.id)
         .await?
-    {
+    else {
+        return Ok(None);
+    };
+
+    if was_newly_set {
         ctx.deps
             .ledger
             .batch_broadcast(
@@ -553,15 +557,15 @@ async fn maybe_record_batch_broadcast(
                 ctx.wallet.ledger_account_ids,
             )
             .await?;
-        Ok(Some((batch_info, tx_id)))
     } else {
-        Ok(None)
+        tx.commit().await?;
     }
+
+    Ok(Some((batch_info, tx_id)))
 }
 
 async fn spend_input_state(
     ctx: &KeychainSyncContext<'_>,
-    unsynced_tx: &UnsyncedTransaction,
     input_outpoints: &[bitcoin::OutPoint],
 ) -> Result<SpendInputState, JobError> {
     if input_outpoints.is_empty() {
@@ -591,16 +595,6 @@ async fn spend_input_state(
         .filter(|outpoint| !found_outpoints.contains(outpoint))
         .take(10)
         .collect::<Vec<_>>();
-
-    warn!(
-        message = "spend_inputs_missing_observed",
-        wallet_id = %ctx.wallet.id,
-        keychain_id = %ctx.keychain_id,
-        tx_id = %unsynced_tx.tx_id,
-        expected = input_outpoints.len(),
-        found = found.len(),
-        ?missing_outpoints,
-    );
 
     Ok(SpendInputState::MissingInputs {
         expected: input_outpoints.len(),

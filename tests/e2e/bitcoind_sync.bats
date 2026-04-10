@@ -220,7 +220,7 @@ teardown_file() {
     --rpc-user "rpcuser" \
     --rpc-password "invalidpassword"
 
-  bria_cmd create-payout-queue -n drift_manual -m true || true
+  bria_cmd create-payout-queue -n drift_manual -m true
 
   bria_address=$(bria_cmd new-address -w default | jq -r '.address')
   bitcoin_cli -regtest sendtoaddress "${bria_address}" "${fund_btc_each}"
