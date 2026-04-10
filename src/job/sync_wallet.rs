@@ -289,13 +289,11 @@ async fn process_unsynced_txs(
                     .wallet
                     .config
                     .latest_settle_height(ctx.current_height, is_spend_tx);
-                let should_settle = unsynced_tx
+                if let Some(conf_time) = unsynced_tx
                     .confirmation_time
                     .as_ref()
-                    .is_some_and(|t| t.height <= settle_height);
-
-                if should_settle {
-                    let conf_time = unsynced_tx.confirmation_time.as_ref().unwrap();
+                    .filter(|t| t.height <= settle_height)
+                {
                     let mut settle_tx = ctx.pool.begin().await?;
                     ctx.bdk_utxos
                         .mark_confirmed(&mut settle_tx, &local_utxo)
