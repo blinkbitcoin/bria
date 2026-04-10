@@ -681,9 +681,7 @@ async fn cleanup_soft_deleted_utxos(ctx: &KeychainSyncContext<'_>) -> Result<(),
             .await
         {
             Ok(_) => (),
-            Err(LedgerError::MismatchedTxMetadata(_)) => {
-                ctx.bdk_utxos.undelete(outpoint).await?
-            }
+            Err(LedgerError::MismatchedTxMetadata(_)) => ctx.bdk_utxos.undelete(outpoint).await?,
             Err(e) => return Err(e.into()),
         }
     }
