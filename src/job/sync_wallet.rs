@@ -1,4 +1,8 @@
-use bdk::blockchain::{ElectrumBlockchain, GetHeight};
+use bdk::{
+    blockchain::{ElectrumBlockchain, GetHeight},
+    wallet::AddressInfo,
+    LocalUtxo,
+};
 use electrum_client::{Client, ConfigBuilder};
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
@@ -10,7 +14,10 @@ use crate::{
     batch::*,
     bdk::{
         error::BdkError,
-        pg::{ConfirmedIncomeUtxo, ConfirmedSpendTransaction, Transactions, Utxos as BdkUtxos},
+        pg::{
+            ConfirmedIncomeUtxo, ConfirmedSpendTransaction, Transactions, UnsyncedTransaction,
+            Utxos as BdkUtxos,
+        },
     },
     fees::{self, FeesClient},
     ledger::*,
@@ -40,6 +47,7 @@ struct InstrumentationTrackers {
     n_confirmed_utxos: usize,
     n_found_txs: usize,
 }
+
 impl InstrumentationTrackers {
     fn new() -> Self {
         InstrumentationTrackers {
@@ -55,6 +63,20 @@ struct Deps {
     bria_addresses: Addresses,
     bria_utxos: Utxos,
     ledger: Ledger,
+}
+
+struct KeychainSyncContext<'a> {
+    pool: &'a sqlx::PgPool,
+    data: &'a SyncWalletData,
+    wallet: &'a Wallet,
+    keychain_wallet: &'a KeychainWallet,
+    deps: &'a Deps,
+    bdk_txs: &'a Transactions,
+    bdk_utxos: &'a BdkUtxos,
+    batches: &'a Batches,
+    keychain_id: KeychainId,
+    current_height: u32,
+    fees_to_encumber: Satoshis,
 }
 
 const MAX_TXS_PER_SYNC: usize = 100;
@@ -85,6 +107,7 @@ pub async fn execute(
 ) -> Result<(bool, SyncWalletData), JobError> {
     info!("Starting sync_wallet job: {:?}", data);
     let span = tracing::Span::current();
+
     let wallet = wallets.find_by_id(data.wallet_id).await?;
     let mut trackers = InstrumentationTrackers::new();
     let deps = Deps {
@@ -93,450 +116,40 @@ pub async fn execute(
         bria_utxos,
         ledger,
     };
-    let mut utxos_to_fetch = HashMap::new();
-    let mut income_bria_utxos = Vec::new();
+
     for keychain_wallet in wallet.keychain_wallets(pool.clone()) {
         info!("Syncing keychain '{}'", keychain_wallet.keychain_id);
+
         let fees_to_encumber =
             fees::fees_to_encumber(&fees_client, keychain_wallet.max_satisfaction_weight()).await?;
         let keychain_id = keychain_wallet.keychain_id;
-        utxos_to_fetch.clear();
-        utxos_to_fetch.insert(keychain_id, Vec::<bitcoin::OutPoint>::new());
+
         let (blockchain, current_height) = init_electrum(&deps.blockchain_cfg.electrum_url).await?;
         span.record("current_height", current_height);
-        let latest_change_settle_height = wallet.config.latest_change_settle_height(current_height);
+
         keychain_wallet.sync(blockchain).await?;
+
         let bdk_txs = Transactions::new(keychain_id, pool.clone());
         let bdk_utxos = BdkUtxos::new(keychain_id, pool.clone());
-        let mut txs_to_skip = Vec::new();
-        info!(
-            "Sync via bdk for keychain '{}'",
-            keychain_wallet.keychain_id
-        );
-        while let Ok(Some(mut unsynced_tx)) = bdk_txs.find_unsynced_tx(&txs_to_skip).await {
-            tracing::info!(?unsynced_tx);
-            income_bria_utxos.clear();
-            trackers.n_found_txs += 1;
-            let mut change = Vec::new();
-            let n_inputs = {
-                let inputs = utxos_to_fetch.get_mut(&keychain_id).unwrap();
-                inputs.clear();
-                for input in unsynced_tx.inputs {
-                    inputs.push(input.0.outpoint);
-                }
-                inputs.len()
-            };
-            let spend_tx = n_inputs > 0;
-            if spend_tx {
-                income_bria_utxos = deps
-                    .bria_utxos
-                    .list_utxos_by_outpoint(&utxos_to_fetch)
-                    .await?;
-                if income_bria_utxos.len() != n_inputs {
-                    txs_to_skip.push(unsynced_tx.tx_id.to_string());
-                    continue;
-                }
-            }
-            txs_to_skip.clear();
-            for output in unsynced_tx.outputs.drain(..) {
-                // Adding `spend_tx` to this validation covers the edge case where someone sends funds to an internal address.
-                if spend_tx && output.0.keychain == bitcoin::KeychainKind::Internal {
-                    change.push(output);
-                    continue;
-                }
-                let (local_utxo, path) = output;
-                let address_info = keychain_wallet
-                    .find_address_from_path(path, local_utxo.keychain)
-                    .await?;
-                let found_addr = NewAddress::builder()
-                    .account_id(data.account_id)
-                    .wallet_id(data.wallet_id)
-                    .keychain_id(keychain_id)
-                    .address(address_info.address.clone().into())
-                    .kind(address_info.keychain)
-                    .address_idx(address_info.index)
-                    .metadata(Some(address_metadata(&unsynced_tx.tx_id)))
-                    .build()
-                    .expect("Could not build new address in sync wallet");
-                if let Some((pending_id, mut tx)) = deps
-                    .bria_utxos
-                    .new_utxo_detected(
-                        data.account_id,
-                        wallet.id,
-                        keychain_id,
-                        &address_info,
-                        &local_utxo,
-                        unsynced_tx.fee_sats,
-                        unsynced_tx.vsize,
-                        spend_tx,
-                        current_height,
-                    )
-                    .await?
-                {
-                    trackers.n_pending_utxos += 1;
-                    deps.bria_addresses
-                        .persist_if_not_present(&mut tx, found_addr)
-                        .await?;
-                    bdk_utxos.mark_as_synced(&mut tx, &local_utxo).await?;
-                    deps.ledger
-                        .utxo_detected(
-                            tx,
-                            pending_id,
-                            UtxoDetectedParams {
-                                journal_id: wallet.journal_id,
-                                onchain_incoming_account_id: wallet
-                                    .ledger_account_ids
-                                    .onchain_incoming_id,
-                                effective_incoming_account_id: wallet
-                                    .ledger_account_ids
-                                    .effective_incoming_id,
-                                onchain_fee_account_id: wallet.ledger_account_ids.fee_id,
-                                meta: UtxoDetectedMeta {
-                                    account_id: data.account_id,
-                                    wallet_id: data.wallet_id,
-                                    keychain_id,
-                                    outpoint: local_utxo.outpoint,
-                                    satoshis: local_utxo.txout.value.into(),
-                                    address: address_info.address.into(),
-                                    encumbered_spending_fees: std::iter::once((
-                                        local_utxo.outpoint,
-                                        fees_to_encumber,
-                                    ))
-                                    .collect(),
-                                    confirmation_time: unsynced_tx.confirmation_time.clone(),
-                                },
-                            },
-                        )
-                        .await?;
-                    let conf_time = match unsynced_tx.confirmation_time.as_ref() {
-                        Some(t)
-                            if t.height
-                                <= wallet.config.latest_settle_height(current_height, spend_tx) =>
-                        {
-                            Some(t)
-                        }
-                        _ => None,
-                    };
-                    if let Some(conf_time) = conf_time {
-                        let mut tx = pool.begin().await?;
-                        bdk_utxos.mark_confirmed(&mut tx, &local_utxo).await?;
-                        let utxo = deps
-                            .bria_utxos
-                            .settle_utxo(
-                                &mut tx,
-                                keychain_id,
-                                local_utxo.outpoint,
-                                local_utxo.is_spent,
-                                conf_time.height,
-                            )
-                            .await?;
-                        trackers.n_confirmed_utxos += 1;
 
-                        deps.ledger
-                            .utxo_settled(
-                                tx,
-                                utxo.utxo_settled_ledger_tx_id,
-                                UtxoSettledParams {
-                                    journal_id: wallet.journal_id,
-                                    ledger_account_ids: wallet.ledger_account_ids,
-                                    pending_id: utxo.utxo_detected_ledger_tx_id,
-                                    meta: UtxoSettledMeta {
-                                        account_id: data.account_id,
-                                        wallet_id: data.wallet_id,
-                                        keychain_id,
-                                        confirmation_time: conf_time.clone(),
-                                        satoshis: utxo.value,
-                                        outpoint: local_utxo.outpoint,
-                                        address: utxo.address,
-                                        already_spent_tx_id: utxo.spend_detected_ledger_tx_id,
-                                    },
-                                },
-                            )
-                            .await?;
-                    }
-                }
-            }
-            if spend_tx {
-                let (mut tx, batch_info, tx_id) = if let Some((tx, create_batch, tx_id)) = batches
-                    .set_batch_broadcast_ledger_tx_id(unsynced_tx.tx_id, wallet.id)
-                    .await?
-                {
-                    (tx, Some(create_batch), tx_id)
-                } else {
-                    (pool.begin().await?, None, LedgerTransactionId::new())
-                };
+        let ctx = KeychainSyncContext {
+            pool: &pool,
+            data: &data,
+            wallet: &wallet,
+            keychain_wallet: &keychain_wallet,
+            deps: &deps,
+            bdk_txs: &bdk_txs,
+            bdk_utxos: &bdk_utxos,
+            batches: &batches,
+            keychain_id,
+            current_height,
+            fees_to_encumber,
+        };
 
-                let mut change_utxos = Vec::new();
-                for (utxo, path) in change.iter() {
-                    let address_info = keychain_wallet
-                        .find_address_from_path(*path, utxo.keychain)
-                        .await?;
-                    let found_addr = NewAddress::builder()
-                        .account_id(data.account_id)
-                        .wallet_id(data.wallet_id)
-                        .keychain_id(keychain_id)
-                        .address(address_info.address.clone().into())
-                        .kind(address_info.keychain)
-                        .address_idx(address_info.index)
-                        .metadata(Some(address_metadata(&unsynced_tx.tx_id)))
-                        .build()
-                        .expect("Could not build new address in sync wallet");
-                    deps.bria_addresses
-                        .persist_if_not_present(&mut tx, found_addr)
-                        .await?;
-                    change_utxos.push((utxo, address_info));
-                }
-
-                if let Some((settled_sats, allocations)) = deps
-                    .bria_utxos
-                    .spend_detected(
-                        &mut tx,
-                        data.account_id,
-                        wallet.id,
-                        keychain_id,
-                        tx_id,
-                        income_bria_utxos
-                            .iter()
-                            .map(|WalletUtxo { outpoint, .. }| outpoint),
-                        &change_utxos,
-                        batch_info
-                            .as_ref()
-                            .map(|info| (info.id, info.payout_queue_id)),
-                        unsynced_tx.fee_sats,
-                        unsynced_tx.vsize,
-                        current_height,
-                    )
-                    .await?
-                {
-                    if let Some(BatchInfo {
-                        created_ledger_tx_id,
-                        ..
-                    }) = batch_info
-                    {
-                        deps.ledger
-                            .batch_broadcast(
-                                tx,
-                                created_ledger_tx_id,
-                                tx_id,
-                                fees_to_encumber,
-                                wallet.ledger_account_ids,
-                            )
-                            .await?;
-                    } else {
-                        let reserved_fees = deps
-                            .ledger
-                            .sum_reserved_fees_in_txs(income_bria_utxos.iter().fold(
-                                HashMap::new(),
-                                |mut m, u| {
-                                    m.entry(u.utxo_detected_ledger_tx_id)
-                                        .or_default()
-                                        .push(u.outpoint);
-                                    m
-                                },
-                            ))
-                            .await?;
-                        deps.ledger
-                            .spend_detected(
-                                tx,
-                                tx_id,
-                                SpendDetectedParams {
-                                    journal_id: wallet.journal_id,
-                                    ledger_account_ids: wallet.ledger_account_ids,
-                                    reserved_fees,
-                                    meta: SpendDetectedMeta {
-                                        encumbered_spending_fees: change_utxos
-                                            .iter()
-                                            .map(|(u, _)| (u.outpoint, fees_to_encumber))
-                                            .collect(),
-                                        withdraw_from_effective_when_settled: allocations,
-                                        tx_summary: WalletTransactionSummary {
-                                            account_id: data.account_id,
-                                            wallet_id: wallet.id,
-                                            current_keychain_id: keychain_id,
-                                            bitcoin_tx_id: unsynced_tx.tx_id,
-                                            total_utxo_in_sats: unsynced_tx.total_utxo_in_sats,
-                                            total_utxo_settled_in_sats: settled_sats,
-                                            fee_sats: unsynced_tx.fee_sats,
-                                            cpfp_details: None,
-                                            cpfp_fee_sats: None,
-                                            change_utxos: change_utxos
-                                                .iter()
-                                                .map(|(u, a)| ChangeOutput {
-                                                    outpoint: u.outpoint,
-                                                    address: a.address.clone().into(),
-                                                    satoshis: Satoshis::from(u.txout.value),
-                                                })
-                                                .collect(),
-                                        },
-                                        confirmation_time: unsynced_tx.confirmation_time.clone(),
-                                    },
-                                },
-                            )
-                            .await?;
-                    }
-                }
-            }
-            bdk_txs.mark_as_synced(unsynced_tx.tx_id).await?;
-            if let Some(conf_time) = unsynced_tx.confirmation_time {
-                if !spend_tx || conf_time.height > latest_change_settle_height {
-                    continue;
-                }
-                let mut tx = pool.begin().await?;
-                if let Some((pending_out_id, confirmed_out_id, change_spent)) = deps
-                    .bria_utxos
-                    .spend_settled(
-                        &mut tx,
-                        keychain_id,
-                        utxos_to_fetch.get(&keychain_id).unwrap().iter(),
-                        change.first().as_ref().map(|(u, _)| u.clone()),
-                        conf_time.height,
-                    )
-                    .await?
-                {
-                    bdk_txs.mark_confirmed(&mut tx, unsynced_tx.tx_id).await?;
-                    deps.ledger
-                        .spend_settled(
-                            tx,
-                            confirmed_out_id,
-                            wallet.journal_id,
-                            wallet.ledger_account_ids,
-                            pending_out_id,
-                            conf_time,
-                            change_spent,
-                        )
-                        .await?;
-                }
-            }
-            if trackers.n_found_txs >= MAX_TXS_PER_SYNC {
-                break;
-            }
-        }
-
-        loop {
-            let mut tx = pool.begin().await?;
-            let min_height = wallet.config.latest_income_settle_height(current_height);
-            if let Ok(Some(ConfirmedIncomeUtxo {
-                outpoint,
-                spent,
-                confirmation_time,
-            })) = bdk_utxos
-                .find_confirmed_income_utxo(&mut tx, min_height)
-                .await
-            {
-                let utxo = deps
-                    .bria_utxos
-                    .settle_utxo(
-                        &mut tx,
-                        keychain_id,
-                        outpoint,
-                        spent,
-                        confirmation_time.height,
-                    )
-                    .await?;
-                trackers.n_confirmed_utxos += 1;
-
-                deps.ledger
-                    .utxo_settled(
-                        tx,
-                        utxo.utxo_settled_ledger_tx_id,
-                        UtxoSettledParams {
-                            journal_id: wallet.journal_id,
-                            ledger_account_ids: wallet.ledger_account_ids,
-                            pending_id: utxo.utxo_detected_ledger_tx_id,
-                            meta: UtxoSettledMeta {
-                                account_id: data.account_id,
-                                wallet_id: data.wallet_id,
-                                keychain_id,
-                                confirmation_time,
-                                satoshis: utxo.value,
-                                outpoint,
-                                address: utxo.address,
-                                already_spent_tx_id: utxo.spend_detected_ledger_tx_id,
-                            },
-                        },
-                    )
-                    .await?;
-            } else {
-                break;
-            }
-        }
-
-        loop {
-            let mut tx = pool.begin().await?;
-            let min_height = wallet.config.latest_change_settle_height(current_height);
-            if let Ok(Some(ConfirmedSpendTransaction {
-                confirmation_time,
-                inputs,
-                outputs,
-                ..
-            })) = bdk_txs.find_confirmed_spend_tx(&mut tx, min_height).await
-            {
-                let change_utxo = outputs
-                    .into_iter()
-                    .find(|u| u.keychain == bitcoin::KeychainKind::Internal);
-                if let Some((pending_out_id, confirmed_out_id, change_spent)) = deps
-                    .bria_utxos
-                    .spend_settled(
-                        &mut tx,
-                        keychain_id,
-                        inputs.iter().map(|u| &u.outpoint),
-                        change_utxo,
-                        confirmation_time.height,
-                    )
-                    .await?
-                {
-                    deps.ledger
-                        .spend_settled(
-                            tx,
-                            confirmed_out_id,
-                            wallet.journal_id,
-                            wallet.ledger_account_ids,
-                            pending_out_id,
-                            confirmation_time,
-                            change_spent,
-                        )
-                        .await?;
-                }
-            } else {
-                break;
-            }
-        }
-
-        loop {
-            let mut tx = pool.begin().await?;
-            if let Some((outpoint, keychain_id)) =
-                bdk_utxos.find_and_remove_soft_deleted_utxo(&mut tx).await?
-            {
-                bdk_txs
-                    .delete_transaction_if_no_more_utxos_exist(&mut tx, outpoint)
-                    .await?;
-                let detected_txn_id = match deps
-                    .bria_utxos
-                    .delete_utxo(&mut tx, outpoint, keychain_id)
-                    .await
-                {
-                    Ok(txn_id) => txn_id,
-                    Err(UtxoError::UtxoDoesNotExistError) => {
-                        tx.commit().await?;
-                        continue;
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                match deps
-                    .ledger
-                    .utxo_dropped(tx, LedgerTransactionId::new(), detected_txn_id)
-                    .await
-                {
-                    Ok(_) => (),
-                    Err(LedgerError::MismatchedTxMetadata(_)) => {
-                        bdk_utxos.undelete(outpoint).await?
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            } else {
-                break;
-            }
-        }
+        process_unsynced_txs(&ctx, &mut trackers).await?;
+        settle_confirmed_income_utxos(&ctx, &mut trackers).await?;
+        settle_confirmed_spend_txs(&ctx).await?;
+        cleanup_soft_deleted_utxos(&ctx).await?;
     }
 
     let has_more = trackers.n_found_txs >= MAX_TXS_PER_SYNC;
@@ -546,6 +159,535 @@ pub async fn execute(
     span.record("has_more", has_more);
 
     Ok((has_more, data))
+}
+
+// Processes unsynced BDK transactions: detects new income UTXOs, records spend
+// transactions, and immediately settles any that are confirmed deep enough.
+async fn process_unsynced_txs(
+    ctx: &KeychainSyncContext<'_>,
+    trackers: &mut InstrumentationTrackers,
+) -> Result<(), JobError> {
+    let latest_change_settle_height = ctx
+        .wallet
+        .config
+        .latest_change_settle_height(ctx.current_height);
+    let mut txs_to_skip = Vec::new();
+
+    while let Ok(Some(mut unsynced_tx)) = ctx.bdk_txs.find_unsynced_tx(&txs_to_skip).await {
+        tracing::info!(?unsynced_tx);
+        trackers.n_found_txs += 1;
+
+        let input_outpoints: Vec<bitcoin::OutPoint> =
+            unsynced_tx.inputs.iter().map(|i| i.0.outpoint).collect();
+        let is_spend_tx = !input_outpoints.is_empty();
+
+        // For spend transactions, all inputs must already be tracked as bria UTXOs.
+        // If they aren't yet (e.g. parent tx not synced), defer this tx and move on.
+        let income_bria_utxos = if is_spend_tx {
+            let utxos_by_keychain = HashMap::from([(ctx.keychain_id, input_outpoints.clone())]);
+            let found = ctx
+                .deps
+                .bria_utxos
+                .list_utxos_by_outpoint(&utxos_by_keychain)
+                .await?;
+
+            if found.len() != input_outpoints.len() {
+                txs_to_skip.push(unsynced_tx.tx_id.to_string());
+                continue;
+            }
+            found
+        } else {
+            Vec::new()
+        };
+        txs_to_skip.clear();
+
+        let mut change_outputs = Vec::new();
+        let mut income_outputs = Vec::new();
+        for output in unsynced_tx.outputs.drain(..) {
+            if is_spend_tx && output.0.keychain == bitcoin::KeychainKind::Internal {
+                change_outputs.push(output);
+            } else {
+                income_outputs.push(output);
+            }
+        }
+
+        for (local_utxo, path) in income_outputs {
+            let address_info = ctx
+                .keychain_wallet
+                .find_address_from_path(path, local_utxo.keychain)
+                .await?;
+
+            let found_addr = NewAddress::builder()
+                .account_id(ctx.data.account_id)
+                .wallet_id(ctx.data.wallet_id)
+                .keychain_id(ctx.keychain_id)
+                .address(address_info.address.clone().into())
+                .kind(address_info.keychain)
+                .address_idx(address_info.index)
+                .metadata(Some(address_metadata(&unsynced_tx.tx_id)))
+                .build()
+                .expect("Could not build new address in sync wallet");
+
+            if let Some((pending_id, mut tx)) = ctx
+                .deps
+                .bria_utxos
+                .new_utxo_detected(
+                    ctx.data.account_id,
+                    ctx.wallet.id,
+                    ctx.keychain_id,
+                    &address_info,
+                    &local_utxo,
+                    unsynced_tx.fee_sats,
+                    unsynced_tx.vsize,
+                    is_spend_tx,
+                    ctx.current_height,
+                )
+                .await?
+            {
+                trackers.n_pending_utxos += 1;
+                ctx.deps
+                    .bria_addresses
+                    .persist_if_not_present(&mut tx, found_addr)
+                    .await?;
+                ctx.bdk_utxos.mark_as_synced(&mut tx, &local_utxo).await?;
+                ctx.deps
+                    .ledger
+                    .utxo_detected(
+                        tx,
+                        pending_id,
+                        UtxoDetectedParams {
+                            journal_id: ctx.wallet.journal_id,
+                            onchain_incoming_account_id: ctx
+                                .wallet
+                                .ledger_account_ids
+                                .onchain_incoming_id,
+                            effective_incoming_account_id: ctx
+                                .wallet
+                                .ledger_account_ids
+                                .effective_incoming_id,
+                            onchain_fee_account_id: ctx.wallet.ledger_account_ids.fee_id,
+                            meta: UtxoDetectedMeta {
+                                account_id: ctx.data.account_id,
+                                wallet_id: ctx.data.wallet_id,
+                                keychain_id: ctx.keychain_id,
+                                outpoint: local_utxo.outpoint,
+                                satoshis: local_utxo.txout.value.into(),
+                                address: address_info.address.into(),
+                                encumbered_spending_fees: std::iter::once((
+                                    local_utxo.outpoint,
+                                    ctx.fees_to_encumber,
+                                ))
+                                .collect(),
+                                confirmation_time: unsynced_tx.confirmation_time.clone(),
+                            },
+                        },
+                    )
+                    .await?;
+
+                // If the UTXO is already confirmed deep enough, settle it immediately.
+                let settle_height = ctx
+                    .wallet
+                    .config
+                    .latest_settle_height(ctx.current_height, is_spend_tx);
+                let should_settle = unsynced_tx
+                    .confirmation_time
+                    .as_ref()
+                    .is_some_and(|t| t.height <= settle_height);
+
+                if should_settle {
+                    let conf_time = unsynced_tx.confirmation_time.as_ref().unwrap();
+                    let mut settle_tx = ctx.pool.begin().await?;
+                    ctx.bdk_utxos
+                        .mark_confirmed(&mut settle_tx, &local_utxo)
+                        .await?;
+                    let utxo = ctx
+                        .deps
+                        .bria_utxos
+                        .settle_utxo(
+                            &mut settle_tx,
+                            ctx.keychain_id,
+                            local_utxo.outpoint,
+                            local_utxo.is_spent,
+                            conf_time.height,
+                        )
+                        .await?;
+                    trackers.n_confirmed_utxos += 1;
+                    ctx.deps
+                        .ledger
+                        .utxo_settled(
+                            settle_tx,
+                            utxo.utxo_settled_ledger_tx_id,
+                            UtxoSettledParams {
+                                journal_id: ctx.wallet.journal_id,
+                                ledger_account_ids: ctx.wallet.ledger_account_ids,
+                                pending_id: utxo.utxo_detected_ledger_tx_id,
+                                meta: UtxoSettledMeta {
+                                    account_id: ctx.data.account_id,
+                                    wallet_id: ctx.data.wallet_id,
+                                    keychain_id: ctx.keychain_id,
+                                    confirmation_time: conf_time.clone(),
+                                    satoshis: utxo.value,
+                                    outpoint: local_utxo.outpoint,
+                                    address: utxo.address,
+                                    already_spent_tx_id: utxo.spend_detected_ledger_tx_id,
+                                },
+                            },
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        if is_spend_tx {
+            process_spend_tx(ctx, &unsynced_tx, &income_bria_utxos, &change_outputs).await?;
+        }
+
+        ctx.bdk_txs.mark_as_synced(unsynced_tx.tx_id).await?;
+
+        // If the spend tx is confirmed and deep enough, settle it immediately.
+        if let Some(conf_time) = unsynced_tx.confirmation_time {
+            if is_spend_tx && conf_time.height <= latest_change_settle_height {
+                let mut settle_tx = ctx.pool.begin().await?;
+                if let Some((pending_out_id, confirmed_out_id, change_spent)) = ctx
+                    .deps
+                    .bria_utxos
+                    .spend_settled(
+                        &mut settle_tx,
+                        ctx.keychain_id,
+                        input_outpoints.iter(),
+                        change_outputs.first().map(|(u, _)| u.clone()),
+                        conf_time.height,
+                    )
+                    .await?
+                {
+                    ctx.bdk_txs
+                        .mark_confirmed(&mut settle_tx, unsynced_tx.tx_id)
+                        .await?;
+                    ctx.deps
+                        .ledger
+                        .spend_settled(
+                            settle_tx,
+                            confirmed_out_id,
+                            ctx.wallet.journal_id,
+                            ctx.wallet.ledger_account_ids,
+                            pending_out_id,
+                            conf_time,
+                            change_spent,
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        if trackers.n_found_txs >= MAX_TXS_PER_SYNC {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+// Records a spend transaction: resolves its batch (if any), persists change
+// addresses, and records spend_detected in the ledger.
+async fn process_spend_tx(
+    ctx: &KeychainSyncContext<'_>,
+    unsynced_tx: &UnsyncedTransaction,
+    income_bria_utxos: &[WalletUtxo],
+    change_outputs: &[(LocalUtxo, u32)],
+) -> Result<(), JobError> {
+    let (mut tx, batch_info, tx_id) = if let Some((tx, create_batch, tx_id)) = ctx
+        .batches
+        .set_batch_broadcast_ledger_tx_id(unsynced_tx.tx_id, ctx.wallet.id)
+        .await?
+    {
+        (tx, Some(create_batch), tx_id)
+    } else {
+        (ctx.pool.begin().await?, None, LedgerTransactionId::new())
+    };
+
+    let mut change_utxos: Vec<(&LocalUtxo, AddressInfo)> = Vec::new();
+    for (utxo, path) in change_outputs {
+        let address_info = ctx
+            .keychain_wallet
+            .find_address_from_path(*path, utxo.keychain)
+            .await?;
+        let found_addr = NewAddress::builder()
+            .account_id(ctx.data.account_id)
+            .wallet_id(ctx.data.wallet_id)
+            .keychain_id(ctx.keychain_id)
+            .address(address_info.address.clone().into())
+            .kind(address_info.keychain)
+            .address_idx(address_info.index)
+            .metadata(Some(address_metadata(&unsynced_tx.tx_id)))
+            .build()
+            .expect("Could not build new address in sync wallet");
+        ctx.deps
+            .bria_addresses
+            .persist_if_not_present(&mut tx, found_addr)
+            .await?;
+        change_utxos.push((utxo, address_info));
+    }
+
+    let spend_detected = ctx
+        .deps
+        .bria_utxos
+        .spend_detected(
+            &mut tx,
+            ctx.data.account_id,
+            ctx.wallet.id,
+            ctx.keychain_id,
+            tx_id,
+            income_bria_utxos
+                .iter()
+                .map(|WalletUtxo { outpoint, .. }| outpoint),
+            &change_utxos,
+            batch_info
+                .as_ref()
+                .map(|info| (info.id, info.payout_queue_id)),
+            unsynced_tx.fee_sats,
+            unsynced_tx.vsize,
+            ctx.current_height,
+        )
+        .await?;
+
+    if let Some((settled_sats, allocations)) = spend_detected {
+        if let Some(BatchInfo {
+            created_ledger_tx_id,
+            ..
+        }) = batch_info
+        {
+            ctx.deps
+                .ledger
+                .batch_broadcast(
+                    tx,
+                    created_ledger_tx_id,
+                    tx_id,
+                    ctx.fees_to_encumber,
+                    ctx.wallet.ledger_account_ids,
+                )
+                .await?;
+        } else {
+            let reserved_fees = ctx
+                .deps
+                .ledger
+                .sum_reserved_fees_in_txs(income_bria_utxos.iter().fold(
+                    HashMap::new(),
+                    |mut m, u| {
+                        m.entry(u.utxo_detected_ledger_tx_id)
+                            .or_default()
+                            .push(u.outpoint);
+                        m
+                    },
+                ))
+                .await?;
+            ctx.deps
+                .ledger
+                .spend_detected(
+                    tx,
+                    tx_id,
+                    SpendDetectedParams {
+                        journal_id: ctx.wallet.journal_id,
+                        ledger_account_ids: ctx.wallet.ledger_account_ids,
+                        reserved_fees,
+                        meta: SpendDetectedMeta {
+                            encumbered_spending_fees: change_utxos
+                                .iter()
+                                .map(|(u, _)| (u.outpoint, ctx.fees_to_encumber))
+                                .collect(),
+                            withdraw_from_effective_when_settled: allocations,
+                            tx_summary: WalletTransactionSummary {
+                                account_id: ctx.data.account_id,
+                                wallet_id: ctx.wallet.id,
+                                current_keychain_id: ctx.keychain_id,
+                                bitcoin_tx_id: unsynced_tx.tx_id,
+                                total_utxo_in_sats: unsynced_tx.total_utxo_in_sats,
+                                total_utxo_settled_in_sats: settled_sats,
+                                fee_sats: unsynced_tx.fee_sats,
+                                cpfp_details: None,
+                                cpfp_fee_sats: None,
+                                change_utxos: change_utxos
+                                    .iter()
+                                    .map(|(u, a)| ChangeOutput {
+                                        outpoint: u.outpoint,
+                                        address: a.address.clone().into(),
+                                        satoshis: Satoshis::from(u.txout.value),
+                                    })
+                                    .collect(),
+                            },
+                            confirmation_time: unsynced_tx.confirmation_time.clone(),
+                        },
+                    },
+                )
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+// Settles income UTXOs that BDK has confirmed but bria hasn't settled yet.
+async fn settle_confirmed_income_utxos(
+    ctx: &KeychainSyncContext<'_>,
+    trackers: &mut InstrumentationTrackers,
+) -> Result<(), JobError> {
+    let min_height = ctx
+        .wallet
+        .config
+        .latest_income_settle_height(ctx.current_height);
+    loop {
+        let mut tx = ctx.pool.begin().await?;
+        let confirmed = ctx
+            .bdk_utxos
+            .find_confirmed_income_utxo(&mut tx, min_height)
+            .await;
+        let Ok(Some(ConfirmedIncomeUtxo {
+            outpoint,
+            spent,
+            confirmation_time,
+        })) = confirmed
+        else {
+            break;
+        };
+
+        let utxo = ctx
+            .deps
+            .bria_utxos
+            .settle_utxo(
+                &mut tx,
+                ctx.keychain_id,
+                outpoint,
+                spent,
+                confirmation_time.height,
+            )
+            .await?;
+        trackers.n_confirmed_utxos += 1;
+
+        ctx.deps
+            .ledger
+            .utxo_settled(
+                tx,
+                utxo.utxo_settled_ledger_tx_id,
+                UtxoSettledParams {
+                    journal_id: ctx.wallet.journal_id,
+                    ledger_account_ids: ctx.wallet.ledger_account_ids,
+                    pending_id: utxo.utxo_detected_ledger_tx_id,
+                    meta: UtxoSettledMeta {
+                        account_id: ctx.data.account_id,
+                        wallet_id: ctx.data.wallet_id,
+                        keychain_id: ctx.keychain_id,
+                        confirmation_time,
+                        satoshis: utxo.value,
+                        outpoint,
+                        address: utxo.address,
+                        already_spent_tx_id: utxo.spend_detected_ledger_tx_id,
+                    },
+                },
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+// Settles spend transactions (and their change UTXOs) that BDK has confirmed
+// but bria hasn't settled yet.
+async fn settle_confirmed_spend_txs(ctx: &KeychainSyncContext<'_>) -> Result<(), JobError> {
+    let min_height = ctx
+        .wallet
+        .config
+        .latest_change_settle_height(ctx.current_height);
+    loop {
+        let mut tx = ctx.pool.begin().await?;
+        let confirmed = ctx
+            .bdk_txs
+            .find_confirmed_spend_tx(&mut tx, min_height)
+            .await;
+        let Ok(Some(ConfirmedSpendTransaction {
+            confirmation_time,
+            inputs,
+            outputs,
+            ..
+        })) = confirmed
+        else {
+            break;
+        };
+
+        let change_utxo = outputs
+            .into_iter()
+            .find(|u| u.keychain == bitcoin::KeychainKind::Internal);
+
+        if let Some((pending_out_id, confirmed_out_id, change_spent)) = ctx
+            .deps
+            .bria_utxos
+            .spend_settled(
+                &mut tx,
+                ctx.keychain_id,
+                inputs.iter().map(|u| &u.outpoint),
+                change_utxo,
+                confirmation_time.height,
+            )
+            .await?
+        {
+            ctx.deps
+                .ledger
+                .spend_settled(
+                    tx,
+                    confirmed_out_id,
+                    ctx.wallet.journal_id,
+                    ctx.wallet.ledger_account_ids,
+                    pending_out_id,
+                    confirmation_time,
+                    change_spent,
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+// Removes soft-deleted UTXOs (e.g. from reorgs) and reverses their ledger entries.
+async fn cleanup_soft_deleted_utxos(ctx: &KeychainSyncContext<'_>) -> Result<(), JobError> {
+    loop {
+        let mut tx = ctx.pool.begin().await?;
+        let Some((outpoint, keychain_id)) = ctx
+            .bdk_utxos
+            .find_and_remove_soft_deleted_utxo(&mut tx)
+            .await?
+        else {
+            break;
+        };
+
+        ctx.bdk_txs
+            .delete_transaction_if_no_more_utxos_exist(&mut tx, outpoint)
+            .await?;
+
+        let detected_txn_id = match ctx
+            .deps
+            .bria_utxos
+            .delete_utxo(&mut tx, outpoint, keychain_id)
+            .await
+        {
+            Ok(txn_id) => txn_id,
+            Err(UtxoError::UtxoDoesNotExistError) => {
+                tx.commit().await?;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        match ctx
+            .deps
+            .ledger
+            .utxo_dropped(tx, LedgerTransactionId::new(), detected_txn_id)
+            .await
+        {
+            Ok(_) => (),
+            Err(LedgerError::MismatchedTxMetadata(_)) => {
+                ctx.bdk_utxos.undelete(outpoint).await?
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 async fn init_electrum(electrum_url: &str) -> Result<(ElectrumBlockchain, u32), BdkError> {
