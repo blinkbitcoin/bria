@@ -17,15 +17,10 @@ teardown_file() {
 @test "outbox: Emits utxo_dropped event" {
   bria_address=$(bria_cmd new-address -w default | jq -r '.address')
   bitcoin_cli -regtest sendtoaddress ${bria_address} 1
-  for i in {1..60}; do
-    n_utxos=$(bria_cmd list-utxos -w default | jq '.keychains[0].utxos | length')
-    [[ "${n_utxos}" == "1" ]] && break
-    sleep 1
-  done
+  retry 60 1 wallet_pending_income_is 100000000
+  wallet_pending_income_is 100000000 || exit 1
   event=$(bria_cmd watch-events -a 0 -o | jq -r '.payload.utxoDetected')
   [ "$event" != "null" ] || exit 1
-  cache_wallet_balance
-  [[ $(cached_pending_income) == 100000000 ]] || exit 1;
 
   restart_bitcoin_stack
   bitcoind_init
@@ -33,8 +28,8 @@ teardown_file() {
   event=$(bria_cmd watch-events -a 1 -o | jq -r '.payload.utxoDropped')
   [ "$event" != "null" ] || exit 1
 
-  cache_wallet_balance
-  [[ $(cached_pending_income) == 0 ]] || exit 1;
+  retry 60 1 wallet_pending_income_is 0
+  wallet_pending_income_is 0 || exit 1
 }
 
 @test "outbox: Adds address augmentation to events" {

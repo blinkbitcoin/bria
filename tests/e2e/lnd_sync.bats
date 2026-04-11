@@ -33,12 +33,8 @@ teardown_file() {
 
   bitcoin_cli -regtest sendtoaddress ${lnd_address} 1
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_pending_income) == 100000000 ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_income) == 100000000 ]] || exit 1
+  retry 60 1 wallet_pending_income_is 100000000
+  wallet_pending_income_is 100000000 || exit 1
 
   n_addresses=$(bria_cmd list-addresses -w default | jq -r '.addresses | length')
   [ "$n_addresses" = "2" ] || exit 1
@@ -50,12 +46,8 @@ teardown_file() {
 
   bitcoin_cli -generate 2
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_current_settled) == 100000000 ]] && break
-    sleep 1
-  done
-  [[ $(cached_current_settled) == 100000000 ]] || exit 1;
+  retry 60 1 wallet_current_settled_is 100000000
+  wallet_current_settled_is 100000000 || exit 1
 
   utxos=$(bria_cmd list-utxos -w default)
   n_utxos=$(jq '.keychains[0].utxos | length' <<< "${utxos}")
@@ -67,13 +59,10 @@ teardown_file() {
 @test "lnd_sync: Detects outgoing transactions" {
   bitcoind_address=$(bitcoin_cli -regtest getnewaddress)
   lnd_cli sendcoins --addr=${bitcoind_address} --amt=50000000
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_pending_outgoing) == 50000000 ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == 50000000 ]] || exit 1
-  [[ $(cached_current_settled) == 0 ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is 50000000
+  wallet_pending_outgoing_is 50000000 || exit 1
+  retry 60 1 wallet_current_settled_is 0
+  wallet_current_settled_is 0 || exit 1
 
   utxos=$(bria_cmd list-utxos -w default)
   n_utxos=$(jq '.keychains[0].utxos | length' <<< "${utxos}")
@@ -83,12 +72,10 @@ teardown_file() {
 
   bitcoin_cli -generate 1
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_current_settled) != 0 ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == 0 ]] || exit 1
+  retry 60 1 wallet_current_settled_is_not 0
+  wallet_current_settled_is_not 0 || exit 1
+  retry 60 1 wallet_pending_outgoing_is 0
+  wallet_pending_outgoing_is 0 || exit 1
 
   utxos=$(bria_cmd list-utxos -w default)
   n_utxos=$(jq '.keychains[0].utxos | length' <<< "${utxos}")
@@ -110,23 +97,17 @@ teardown_file() {
   bitcoind_address=$(bitcoin_cli -regtest getnewaddress)
   lnd_cli sendcoins --addr=${bitcoind_address} --amt=210000000 --min_confs 0
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_pending_outgoing) == 210000000 ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == 210000000 ]] || exit 1
-  [[ $(cached_effective_settled) != 0 ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is 210000000
+  wallet_pending_outgoing_is 210000000 || exit 1
+  retry 60 1 wallet_effective_settled_is_not 0
+  wallet_effective_settled_is_not 0 || exit 1
 
   bitcoin_cli -generate 2
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_pending_outgoing) == 0 ]] && break
-    sleep 1
-  done
+  retry 60 1 wallet_pending_outgoing_is 0
+  wallet_pending_outgoing_is 0 || exit 1
 
-  lnd_balance=$(lnd_cli walletbalance | jq -r '.total_balance')
-  [[ "$(cached_effective_settled)" == "${lnd_balance}" ]] || exit 1
+  retry 60 1 wallet_effective_settled_matches_lnd_balance
+  wallet_effective_settled_matches_lnd_balance || exit 1
 }
 
 @test "lnd_sync: Can sweep all" {
@@ -134,13 +115,10 @@ teardown_file() {
   lnd_cli sendcoins --addr=${bitcoind_address} --sweepall
   bitcoin_cli -generate 1
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_fees) == 0 ]] && break
-    sleep 1
-  done
-  [[ $(cached_encumbered_fees) == 0 ]] || exit 1
-  [[ $(cached_effective_settled) == 0 ]] || exit 1
+  retry 60 1 wallet_encumbered_fees_is 0
+  wallet_encumbered_fees_is 0 || exit 1
+  retry 60 1 wallet_effective_settled_is 0
+  wallet_effective_settled_is 0 || exit 1
 }
 
 @test "lnd_sync: Can spend only from unconfirmed" {
@@ -149,22 +127,16 @@ teardown_file() {
   bitcoind_address=$(bitcoin_cli -regtest getnewaddress)
   lnd_cli sendcoins --addr=${bitcoind_address} --amt=60000000 --min_confs 0
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_pending_outgoing) == 60000000 ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == 60000000 ]] || exit 1
-  [[ $(cached_effective_settled) == 0 ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is 60000000
+  wallet_pending_outgoing_is 60000000 || exit 1
+  retry 60 1 wallet_effective_settled_is 0
+  wallet_effective_settled_is 0 || exit 1
 
   bitcoin_cli -generate 2
-  for i in {1..60}; do
-    cache_wallet_balance
-    [[ $(cached_pending_outgoing) == 0 ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == 0 ]] || exit 1
-  [[ $(cached_effective_settled) == $(cached_current_settled) ]] || exit 1
-  lnd_balance=$(lnd_cli walletbalance | jq -r '.total_balance')
-  [[ "$(cached_effective_settled)" == "${lnd_balance}" ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is 0
+  wallet_pending_outgoing_is 0 || exit 1
+  retry 60 1 wallet_effective_settled_matches_current_settled
+  wallet_effective_settled_matches_current_settled || exit 1
+  retry 60 1 wallet_effective_settled_matches_lnd_balance
+  wallet_effective_settled_matches_lnd_balance || exit 1
 }
