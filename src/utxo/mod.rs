@@ -16,6 +16,12 @@ pub use entity::*;
 use error::UtxoError;
 use repo::*;
 
+pub enum SpendDetectedOutcome {
+    Applied(Satoshis, HashMap<bitcoin::OutPoint, Satoshis>),
+    AlreadyApplied,
+    Deferred,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum UtxoSelectionMode {
     Payout,
@@ -112,7 +118,7 @@ impl Utxos {
         tx_fee: Satoshis,
         tx_vbytes: u64,
         current_block_height: u32,
-    ) -> Result<Option<(Satoshis, HashMap<bitcoin::OutPoint, Satoshis>)>, UtxoError> {
+    ) -> Result<SpendDetectedOutcome, UtxoError> {
         let mut inputs = Vec::new();
         let mut input_tx_ids = Vec::new();
 
@@ -145,29 +151,28 @@ impl Utxos {
                     .origin_tx_payout_queue_id(payout_queue_id);
             }
 
-            let res = self
-                .utxos
+            self.utxos
                 .persist_utxo(tx, new_utxo.build().expect("Could not build NewUtxo"))
                 .await?;
-            if res.is_none() {
-                return Ok(None);
-            }
         }
-        let utxos = self
+        let mark_spent_res = self
             .utxos
             .mark_spent(tx, keychain_id, inputs.into_iter(), tx_id)
             .await?;
-        if utxos.is_empty() {
-            return Ok(None);
+        match mark_spent_res {
+            MarkSpentResult::Spent(utxos) => {
+                let (total_settled_in, allocations) =
+                    effective_allocation::withdraw_from_effective_when_settled(
+                        utxos,
+                        change_utxos.iter().fold(Satoshis::ZERO, |s, (u, _)| {
+                            s + Satoshis::from(u.txout.value)
+                        }),
+                    );
+                Ok(SpendDetectedOutcome::Applied(total_settled_in, allocations))
+            }
+            MarkSpentResult::AlreadySpent => Ok(SpendDetectedOutcome::AlreadyApplied),
+            MarkSpentResult::Deferred => Ok(SpendDetectedOutcome::Deferred),
         }
-        let (total_settled_in, allocations) =
-            effective_allocation::withdraw_from_effective_when_settled(
-                utxos,
-                change_utxos.iter().fold(Satoshis::ZERO, |s, (u, _)| {
-                    s + Satoshis::from(u.txout.value)
-                }),
-            );
-        Ok(Some((total_settled_in, allocations)))
     }
 
     #[instrument(name = "utxos.spend_settled", skip(self, tx, inputs), err)]

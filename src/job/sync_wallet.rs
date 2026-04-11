@@ -22,7 +22,7 @@ use crate::{
     fees::{self, FeesClient},
     ledger::*,
     primitives::*,
-    utxo::{error::UtxoError, Utxos, WalletUtxo},
+    utxo::{error::UtxoError, SpendDetectedOutcome, Utxos, WalletUtxo},
     wallet::*,
 };
 use std::collections::HashMap;
@@ -502,81 +502,88 @@ async fn process_spend_tx(
         )
         .await?;
 
-    if let Some((settled_sats, allocations)) = spend_detected {
-        for addr in change_addrs {
-            ctx.deps
-                .bria_addresses
-                .persist_if_not_present(&mut tx, addr)
-                .await?;
-        }
+    match spend_detected {
+        SpendDetectedOutcome::Applied(settled_sats, allocations) => {
+            for addr in change_addrs {
+                ctx.deps
+                    .bria_addresses
+                    .persist_if_not_present(&mut tx, addr)
+                    .await?;
+            }
 
-        if batch_info.is_none() {
-            let reserved_fees = ctx
-                .deps
-                .ledger
-                .sum_reserved_fees_in_txs(income_bria_utxos.iter().fold(
-                    HashMap::new(),
-                    |mut m, u| {
-                        m.entry(u.utxo_detected_ledger_tx_id)
-                            .or_default()
-                            .push(u.outpoint);
-                        m
-                    },
-                ))
-                .await?;
-            ctx.deps
-                .ledger
-                .spend_detected(
-                    tx,
-                    tx_id,
-                    SpendDetectedParams {
-                        journal_id: ctx.wallet.journal_id,
-                        ledger_account_ids: ctx.wallet.ledger_account_ids,
-                        reserved_fees,
-                        meta: SpendDetectedMeta {
-                            encumbered_spending_fees: change_utxos
-                                .iter()
-                                .map(|(u, _)| (u.outpoint, ctx.fees_to_encumber))
-                                .collect(),
-                            withdraw_from_effective_when_settled: allocations,
-                            tx_summary: WalletTransactionSummary {
-                                account_id: ctx.data.account_id,
-                                wallet_id: ctx.wallet.id,
-                                current_keychain_id: ctx.keychain_id,
-                                bitcoin_tx_id: unsynced_tx.tx_id,
-                                total_utxo_in_sats: unsynced_tx.total_utxo_in_sats,
-                                total_utxo_settled_in_sats: settled_sats,
-                                fee_sats: unsynced_tx.fee_sats,
-                                cpfp_details: None,
-                                cpfp_fee_sats: None,
-                                change_utxos: change_utxos
-                                    .iter()
-                                    .map(|(u, a)| ChangeOutput {
-                                        outpoint: u.outpoint,
-                                        address: a.address.clone().into(),
-                                        satoshis: Satoshis::from(u.txout.value),
-                                    })
-                                    .collect(),
-                            },
-                            confirmation_time: unsynced_tx.confirmation_time.clone(),
+            if batch_info.is_none() {
+                let reserved_fees = ctx
+                    .deps
+                    .ledger
+                    .sum_reserved_fees_in_txs(income_bria_utxos.iter().fold(
+                        HashMap::new(),
+                        |mut m, u| {
+                            m.entry(u.utxo_detected_ledger_tx_id)
+                                .or_default()
+                                .push(u.outpoint);
+                            m
                         },
-                    },
-                )
-                .await?;
-        } else {
-            tx.commit().await?;
+                    ))
+                    .await?;
+                ctx.deps
+                    .ledger
+                    .spend_detected(
+                        tx,
+                        tx_id,
+                        SpendDetectedParams {
+                            journal_id: ctx.wallet.journal_id,
+                            ledger_account_ids: ctx.wallet.ledger_account_ids,
+                            reserved_fees,
+                            meta: SpendDetectedMeta {
+                                encumbered_spending_fees: change_utxos
+                                    .iter()
+                                    .map(|(u, _)| (u.outpoint, ctx.fees_to_encumber))
+                                    .collect(),
+                                withdraw_from_effective_when_settled: allocations,
+                                tx_summary: WalletTransactionSummary {
+                                    account_id: ctx.data.account_id,
+                                    wallet_id: ctx.wallet.id,
+                                    current_keychain_id: ctx.keychain_id,
+                                    bitcoin_tx_id: unsynced_tx.tx_id,
+                                    total_utxo_in_sats: unsynced_tx.total_utxo_in_sats,
+                                    total_utxo_settled_in_sats: settled_sats,
+                                    fee_sats: unsynced_tx.fee_sats,
+                                    cpfp_details: None,
+                                    cpfp_fee_sats: None,
+                                    change_utxos: change_utxos
+                                        .iter()
+                                        .map(|(u, a)| ChangeOutput {
+                                            outpoint: u.outpoint,
+                                            address: a.address.clone().into(),
+                                            satoshis: Satoshis::from(u.txout.value),
+                                        })
+                                        .collect(),
+                                },
+                                confirmation_time: unsynced_tx.confirmation_time.clone(),
+                            },
+                        },
+                    )
+                    .await?;
+            } else {
+                tx.commit().await?;
+            }
+
+            Ok(SpendOutcome::Applied)
         }
-
-        return Ok(SpendOutcome::Applied);
+        SpendDetectedOutcome::AlreadyApplied => {
+            tx.commit().await?;
+            Ok(SpendOutcome::Applied)
+        }
+        SpendDetectedOutcome::Deferred => {
+            warn!(
+                message = "spend_detected_deferred",
+                wallet_id = %ctx.wallet.id,
+                keychain_id = %ctx.keychain_id,
+                tx_id = %unsynced_tx.tx_id,
+            );
+            Ok(SpendOutcome::Deferred)
+        }
     }
-
-    warn!(
-        message = "spend_detected_deferred",
-        wallet_id = %ctx.wallet.id,
-        keychain_id = %ctx.keychain_id,
-        tx_id = %unsynced_tx.tx_id,
-    );
-    Ok(SpendOutcome::Deferred)
 }
 
 async fn maybe_record_batch_broadcast(
