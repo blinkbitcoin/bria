@@ -90,6 +90,11 @@ enum SpendInputState {
     },
 }
 
+enum SpendOutcome {
+    Applied,
+    Deferred,
+}
+
 const MAX_TXS_PER_SYNC: usize = 100;
 
 #[instrument(
@@ -380,7 +385,7 @@ async fn process_unsynced_txs(
         }
 
         if is_spend_tx {
-            process_spend_tx(
+            let outcome = process_spend_tx(
                 ctx,
                 &unsynced_tx,
                 &income_bria_utxos,
@@ -388,6 +393,10 @@ async fn process_unsynced_txs(
                 batch_broadcast_info,
             )
             .await?;
+            if let SpendOutcome::Deferred = outcome {
+                txs_to_skip.push(unsynced_tx.tx_id.to_string());
+                continue;
+            }
         }
 
         ctx.bdk_txs.mark_as_synced(unsynced_tx.tx_id).await?;
@@ -443,7 +452,7 @@ async fn process_spend_tx(
     income_bria_utxos: &[WalletUtxo],
     change_outputs: &[(LocalUtxo, u32)],
     batch_broadcast_info: Option<(BatchInfo, LedgerTransactionId)>,
-) -> Result<(), JobError> {
+) -> Result<SpendOutcome, JobError> {
     let (mut tx, batch_info, tx_id) = if let Some((batch_info, tx_id)) = batch_broadcast_info {
         (ctx.pool.begin().await?, Some(batch_info), tx_id)
     } else {
@@ -557,9 +566,17 @@ async fn process_spend_tx(
         } else {
             tx.commit().await?;
         }
+
+        return Ok(SpendOutcome::Applied);
     }
 
-    Ok(())
+    warn!(
+        message = "spend_detected_deferred",
+        wallet_id = %ctx.wallet.id,
+        keychain_id = %ctx.keychain_id,
+        tx_id = %unsynced_tx.tx_id,
+    );
+    Ok(SpendOutcome::Deferred)
 }
 
 async fn maybe_record_batch_broadcast(
