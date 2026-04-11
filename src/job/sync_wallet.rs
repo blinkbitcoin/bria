@@ -530,12 +530,10 @@ async fn process_spend_tx(
                     },
                 )
                 .await?;
-
-            return Ok(());
+        } else {
+            tx.commit().await?;
         }
     }
-
-    tx.commit().await?;
 
     Ok(())
 }
