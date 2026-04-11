@@ -17,7 +17,7 @@ pub struct BatchBroadcastLedgerTx<'a> {
     pub tx: Transaction<'a, Postgres>,
     pub batch_info: BatchInfo,
     pub ledger_tx_id: LedgerTxId,
-    pub was_newly_set: bool,
+    pub(crate) was_newly_set: bool,
 }
 
 #[derive(Debug, Clone)]

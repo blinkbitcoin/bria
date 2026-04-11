@@ -213,7 +213,7 @@ impl UtxoRepo {
             .await?
             .get("existing_count");
 
-        if existing_count as usize == n_inputs && spent_utxos.is_empty() {
+        if existing_count as usize == n_inputs {
             Ok(MarkSpentResult::AlreadySpent)
         } else {
             Ok(MarkSpentResult::Deferred)

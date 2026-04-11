@@ -571,6 +571,12 @@ async fn process_spend_tx(
             Ok(SpendOutcome::Applied)
         }
         SpendDetectedOutcome::AlreadyApplied => {
+            for addr in change_addrs {
+                ctx.deps
+                    .bria_addresses
+                    .persist_if_not_present(&mut tx, addr)
+                    .await?;
+            }
             tx.commit().await?;
             Ok(SpendOutcome::Applied)
         }
