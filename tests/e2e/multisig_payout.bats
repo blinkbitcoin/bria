@@ -97,23 +97,13 @@ teardown_file() {
     echo "signing_failure_reason: ${signing_failure_reason}"
   fi
 
-  for i in {1..20}; do
-    cache_wallet_balance multisig
-    [[ $(cached_pending_income) != 0 ]] && break;
-    sleep 1
-  done
-
-  [[ $(cached_pending_income) != 0 ]] || exit 1
+  retry 60 1 wallet_pending_income_is_not 0 multisig
+  wallet_pending_income_is_not 0 multisig || exit 1
   [[ $(cached_current_settled) == 0 ]] || exit 1
   bitcoin_cli -generate 2
 
-  for i in {1..20}; do
-    cache_wallet_balance multisig
-    [[ $(cached_current_settled) != 0 ]] && break;
-    sleep 1
-  done
-
-  [[ $(cached_current_settled) != 0 ]] || exit 1;
+  retry 60 1 wallet_current_settled_is_not 0 multisig
+  wallet_current_settled_is_not 0 multisig || exit 1
 }
 
 @test "multisig_payout: Broadcast a txn using bitcoind and check if balance updated" {
@@ -135,19 +125,11 @@ teardown_file() {
   hex=$(bitcoin_cli finalizepsbt "${signed_psbt2}" true | jq -r '.hex')
   bitcoin_cli sendrawtransaction "${hex}"
 
-  for i in {1..20}; do
-    cache_wallet_balance multisig
-    [[ $(cached_pending_income) != 0 ]] && break;
-    sleep 1
-  done
-  [[ $(cached_pending_income) != 0 ]] || exit 1
+  retry 60 1 wallet_pending_income_is_not 0 multisig
+  wallet_pending_income_is_not 0 multisig || exit 1
  
   bitcoin_cli -generate 2 
 
-  for i in {1..20}; do
-    cache_wallet_balance multisig
-    [[ $(cached_pending_income) == 0 ]] && break;
-    sleep 1
-  done
-  [[ $(cached_pending_income) == 0 ]] || exit 1;
+  retry 60 1 wallet_pending_income_is 0 multisig
+  wallet_pending_income_is 0 multisig || exit 1
 }

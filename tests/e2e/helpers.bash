@@ -200,15 +200,201 @@ retry() {
   local delay=$1
   shift
   local i
+  local attempt_status
 
-  for ((i=0; i < attempts; i++)); do
-    run "$@"
-    if [[ "$status" -eq 0 ]] ; then
+  for ((i = 0; i < attempts; i++)); do
+    if [[ "${BATS_TEST_DIRNAME}" = "" ]]; then
+      "$@"
+      attempt_status=$?
+    else
+      run "$@"
+      attempt_status=$status
+    fi
+
+    if [[ "$attempt_status" -eq 0 ]]; then
       return 0
     fi
+
     sleep "$delay"
   done
 
   echo "Command \"$*\" failed $attempts times. Output: $output"
   false
+}
+
+wallet_pending_outgoing_is() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_pending_outgoing)" == "${expected}" ]]
+}
+
+wallet_pending_income_is() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_pending_income)" == "${expected}" ]]
+}
+
+wallet_pending_income_is_not() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_pending_income)" != "${expected}" ]]
+}
+
+wallet_current_settled_is() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_current_settled)" == "${expected}" ]]
+}
+
+wallet_current_settled_ge() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ $(cached_current_settled) -ge ${expected} ]]
+}
+
+wallet_pending_outgoing_is_not() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_pending_outgoing)" != "${expected}" ]]
+}
+
+wallet_encumbered_outgoing_is() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_encumbered_outgoing)" == "${expected}" ]]
+}
+
+wallet_current_settled_is_not() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_current_settled)" != "${expected}" ]]
+}
+
+wallet_current_settled_or_pending_outgoing_is_not_zero() {
+  local wallet_name="${1:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_current_settled)" != "0" || "$(cached_pending_outgoing)" != "0" ]]
+}
+
+wallet_encumbered_fees_is() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_encumbered_fees)" == "${expected}" ]]
+}
+
+wallet_effective_settled_is() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_effective_settled)" == "${expected}" ]]
+}
+
+wallet_encumbered_outgoing_is_and_effective_settled_ge() {
+  local encumbered_expected="$1"
+  local effective_settled_min="$2"
+  local wallet_name="${3:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_encumbered_outgoing)" == "${encumbered_expected}" && $(cached_effective_settled) -ge ${effective_settled_min} ]]
+}
+
+wallet_encumbered_outgoing_is_and_effective_settled_is() {
+  local encumbered_expected="$1"
+  local effective_settled_expected="$2"
+  local wallet_name="${3:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_encumbered_outgoing)" == "${encumbered_expected}" && "$(cached_effective_settled)" == "${effective_settled_expected}" ]]
+}
+
+wallet_effective_settled_matches_current_settled() {
+  local wallet_name="${1:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_effective_settled)" == "$(cached_current_settled)" ]]
+}
+
+wallet_current_settled_is_zero_and_pending_outgoing_is_not_zero() {
+  local wallet_name="${1:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_current_settled)" == "0" && "$(cached_pending_outgoing)" != "0" ]]
+}
+
+wallet_pending_outgoing_and_encumbered_fees_are_zero() {
+  local wallet_name="${1:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_pending_outgoing)" == "0" && "$(cached_encumbered_fees)" == "0" ]]
+}
+
+bdk_tx_synced_flag_is() {
+  local tx_id="$1"
+  local expected="$2"
+  local synced_flag
+
+  synced_flag=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT synced_to_bria::int FROM bdk_transactions WHERE tx_id = '${tx_id}' ORDER BY modified_at DESC LIMIT 1" | tr -d '[:space:]')
+  [[ "${synced_flag}" == "${expected}" ]]
+}
+
+wallet_encumbered_outgoing_is_zero() {
+  local wallet_name="${1:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_encumbered_outgoing)" == "0" ]]
+}
+
+wallet_effective_settled_is_not() {
+  local expected="$1"
+  local wallet_name="${2:-default}"
+
+  cache_wallet_balance "${wallet_name}"
+  [[ "$(cached_effective_settled)" != "${expected}" ]]
+}
+
+signer_unconfirmed_balance_is() {
+  local expected="$1"
+  [[ "$(bitcoin_signer_cli getunconfirmedbalance)" == "${expected}" ]]
+}
+
+wallet_effective_settled_matches_signer_balance() {
+  local wallet_name="${1:-default}"
+  local bitcoind_signer_balance_in_btc
+  local bitcoind_signer_balance
+
+  cache_wallet_balance "${wallet_name}"
+  bitcoind_signer_balance_in_btc=$(bitcoin_signer_cli getbalance)
+  bitcoind_signer_balance=$(convert_btc_to_sats "${bitcoind_signer_balance_in_btc}")
+
+  [[ "$(cached_effective_settled)" == "${bitcoind_signer_balance}" ]]
+}
+
+wallet_effective_settled_matches_lnd_balance() {
+  local wallet_name="${1:-default}"
+  local lnd_balance
+
+  cache_wallet_balance "${wallet_name}"
+  lnd_balance=$(lnd_cli walletbalance | jq -r '.total_balance')
+
+  [[ "$(cached_effective_settled)" == "${lnd_balance}" ]]
 }
