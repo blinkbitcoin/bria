@@ -5,6 +5,3 @@ app:
   fees:
     mempool_space:
       url: http://mempool:8999
-  jobs:
-    sync_all_wallets_delay: 1
-    process_all_payout_queues_delay: 1
