@@ -5,7 +5,7 @@ use bdk::{
 };
 use electrum_client::{Client, ConfigBuilder};
 use serde::{Deserialize, Serialize};
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use super::error::JobError;
 use crate::{
@@ -22,10 +22,10 @@ use crate::{
     fees::{self, FeesClient},
     ledger::*,
     primitives::*,
-    utxo::{error::UtxoError, Utxos, WalletUtxo},
+    utxo::{error::UtxoError, SpendDetectedOutcome, Utxos, WalletUtxo},
     wallet::*,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncWalletData {
@@ -77,6 +77,22 @@ struct KeychainSyncContext<'a> {
     keychain_id: KeychainId,
     current_height: u32,
     fees_to_encumber: Satoshis,
+}
+
+enum SpendInputState {
+    CompleteInputs {
+        income_bria_utxos: Vec<WalletUtxo>,
+    },
+    MissingInputs {
+        expected: usize,
+        found: usize,
+        missing_outpoints: Vec<bitcoin::OutPoint>,
+    },
+}
+
+enum SpendOutcome {
+    Applied,
+    Deferred,
 }
 
 const MAX_TXS_PER_SYNC: usize = 100;
@@ -181,21 +197,53 @@ async fn process_unsynced_txs(
             unsynced_tx.inputs.iter().map(|i| i.0.outpoint).collect();
         let is_spend_tx = !input_outpoints.is_empty();
 
-        // For spend transactions, all inputs must already be tracked as bria UTXOs.
-        // If they aren't yet (e.g. parent tx not synced), defer this tx and move on.
-        let income_bria_utxos = if is_spend_tx {
-            let utxos_by_keychain = HashMap::from([(ctx.keychain_id, input_outpoints.clone())]);
-            let found = ctx
-                .deps
-                .bria_utxos
-                .list_utxos_by_outpoint(&utxos_by_keychain)
-                .await?;
+        // Batch broadcast is recorded before input validation intentionally.
+        // During incident recovery, inputs from a prior wallet may not yet be synced
+        // when this tx is first seen. Recording the broadcast ledger entry early ensures
+        // it is not lost; spend accounting is deferred until inputs converge on a later
+        // sync cycle. This creates a temporary window where a broadcast entry exists
+        // without a matching spend_detected entry — this is expected and observable via
+        // the "batch_broadcast_recorded_while_spend_deferred" log event.
+        let batch_broadcast_info = if is_spend_tx {
+            maybe_record_batch_broadcast(ctx, &unsynced_tx).await?
+        } else {
+            None
+        };
 
-            if found.len() != input_outpoints.len() {
-                txs_to_skip.push(unsynced_tx.tx_id.to_string());
-                continue;
+        let income_bria_utxos = if is_spend_tx {
+            let spend_input_state = spend_input_state(ctx, &input_outpoints).await?;
+            match spend_input_state {
+                SpendInputState::CompleteInputs { income_bria_utxos } => income_bria_utxos,
+                SpendInputState::MissingInputs {
+                    expected,
+                    found,
+                    missing_outpoints,
+                } => {
+                    if let Some((batch_info, batch_broadcast_ledger_tx_id)) =
+                        batch_broadcast_info.as_ref()
+                    {
+                        info!(
+                            message = "batch_broadcast_recorded_while_spend_deferred",
+                            wallet_id = %ctx.wallet.id,
+                            keychain_id = %ctx.keychain_id,
+                            tx_id = %unsynced_tx.tx_id,
+                            batch_id = %batch_info.id,
+                            batch_broadcast_ledger_tx_id = %batch_broadcast_ledger_tx_id,
+                        );
+                    }
+                    warn!(
+                        message = "spend_inputs_missing",
+                        wallet_id = %ctx.wallet.id,
+                        keychain_id = %ctx.keychain_id,
+                        tx_id = %unsynced_tx.tx_id,
+                        expected,
+                        found,
+                        ?missing_outpoints,
+                    );
+                    txs_to_skip.push(unsynced_tx.tx_id.to_string());
+                    continue;
+                }
             }
-            found
         } else {
             Vec::new()
         };
@@ -337,7 +385,18 @@ async fn process_unsynced_txs(
         }
 
         if is_spend_tx {
-            process_spend_tx(ctx, &unsynced_tx, &income_bria_utxos, &change_outputs).await?;
+            let outcome = process_spend_tx(
+                ctx,
+                &unsynced_tx,
+                &income_bria_utxos,
+                &change_outputs,
+                batch_broadcast_info,
+            )
+            .await?;
+            if let SpendOutcome::Deferred = outcome {
+                txs_to_skip.push(unsynced_tx.tx_id.to_string());
+                continue;
+            }
         }
 
         ctx.bdk_txs.mark_as_synced(unsynced_tx.tx_id).await?;
@@ -392,18 +451,16 @@ async fn process_spend_tx(
     unsynced_tx: &UnsyncedTransaction,
     income_bria_utxos: &[WalletUtxo],
     change_outputs: &[(LocalUtxo, u32)],
-) -> Result<(), JobError> {
-    let (mut tx, batch_info, tx_id) = if let Some((tx, create_batch, tx_id)) = ctx
-        .batches
-        .set_batch_broadcast_ledger_tx_id(unsynced_tx.tx_id, ctx.wallet.id)
-        .await?
-    {
-        (tx, Some(create_batch), tx_id)
+    batch_broadcast_info: Option<(BatchInfo, LedgerTransactionId)>,
+) -> Result<SpendOutcome, JobError> {
+    let (mut tx, batch_info, tx_id) = if let Some((batch_info, tx_id)) = batch_broadcast_info {
+        (ctx.pool.begin().await?, Some(batch_info), tx_id)
     } else {
         (ctx.pool.begin().await?, None, LedgerTransactionId::new())
     };
 
     let mut change_utxos: Vec<(&LocalUtxo, AddressInfo)> = Vec::new();
+    let mut change_addrs = Vec::new();
     for (utxo, path) in change_outputs {
         let address_info = ctx
             .keychain_wallet
@@ -419,10 +476,7 @@ async fn process_spend_tx(
             .metadata(Some(address_metadata(&unsynced_tx.tx_id)))
             .build()
             .expect("Could not build new address in sync wallet");
-        ctx.deps
-            .bria_addresses
-            .persist_if_not_present(&mut tx, found_addr)
-            .await?;
+        change_addrs.push(found_addr);
         change_utxos.push((utxo, address_info));
     }
 
@@ -448,79 +502,161 @@ async fn process_spend_tx(
         )
         .await?;
 
-    if let Some((settled_sats, allocations)) = spend_detected {
-        if let Some(BatchInfo {
-            created_ledger_tx_id,
-            ..
-        }) = batch_info
-        {
-            ctx.deps
-                .ledger
-                .batch_broadcast(
-                    tx,
-                    created_ledger_tx_id,
-                    tx_id,
-                    ctx.fees_to_encumber,
-                    ctx.wallet.ledger_account_ids,
-                )
-                .await?;
-        } else {
-            let reserved_fees = ctx
-                .deps
-                .ledger
-                .sum_reserved_fees_in_txs(income_bria_utxos.iter().fold(
-                    HashMap::new(),
-                    |mut m, u| {
-                        m.entry(u.utxo_detected_ledger_tx_id)
-                            .or_default()
-                            .push(u.outpoint);
-                        m
-                    },
-                ))
-                .await?;
-            ctx.deps
-                .ledger
-                .spend_detected(
-                    tx,
-                    tx_id,
-                    SpendDetectedParams {
-                        journal_id: ctx.wallet.journal_id,
-                        ledger_account_ids: ctx.wallet.ledger_account_ids,
-                        reserved_fees,
-                        meta: SpendDetectedMeta {
-                            encumbered_spending_fees: change_utxos
-                                .iter()
-                                .map(|(u, _)| (u.outpoint, ctx.fees_to_encumber))
-                                .collect(),
-                            withdraw_from_effective_when_settled: allocations,
-                            tx_summary: WalletTransactionSummary {
-                                account_id: ctx.data.account_id,
-                                wallet_id: ctx.wallet.id,
-                                current_keychain_id: ctx.keychain_id,
-                                bitcoin_tx_id: unsynced_tx.tx_id,
-                                total_utxo_in_sats: unsynced_tx.total_utxo_in_sats,
-                                total_utxo_settled_in_sats: settled_sats,
-                                fee_sats: unsynced_tx.fee_sats,
-                                cpfp_details: None,
-                                cpfp_fee_sats: None,
-                                change_utxos: change_utxos
-                                    .iter()
-                                    .map(|(u, a)| ChangeOutput {
-                                        outpoint: u.outpoint,
-                                        address: a.address.clone().into(),
-                                        satoshis: Satoshis::from(u.txout.value),
-                                    })
-                                    .collect(),
-                            },
-                            confirmation_time: unsynced_tx.confirmation_time.clone(),
+    match spend_detected {
+        SpendDetectedOutcome::Applied(settled_sats, allocations) => {
+            for addr in change_addrs {
+                ctx.deps
+                    .bria_addresses
+                    .persist_if_not_present(&mut tx, addr)
+                    .await?;
+            }
+
+            if batch_info.is_none() {
+                let reserved_fees = ctx
+                    .deps
+                    .ledger
+                    .sum_reserved_fees_in_txs(income_bria_utxos.iter().fold(
+                        HashMap::new(),
+                        |mut m, u| {
+                            m.entry(u.utxo_detected_ledger_tx_id)
+                                .or_default()
+                                .push(u.outpoint);
+                            m
                         },
-                    },
-                )
-                .await?;
+                    ))
+                    .await?;
+                ctx.deps
+                    .ledger
+                    .spend_detected(
+                        tx,
+                        tx_id,
+                        SpendDetectedParams {
+                            journal_id: ctx.wallet.journal_id,
+                            ledger_account_ids: ctx.wallet.ledger_account_ids,
+                            reserved_fees,
+                            meta: SpendDetectedMeta {
+                                encumbered_spending_fees: change_utxos
+                                    .iter()
+                                    .map(|(u, _)| (u.outpoint, ctx.fees_to_encumber))
+                                    .collect(),
+                                withdraw_from_effective_when_settled: allocations,
+                                tx_summary: WalletTransactionSummary {
+                                    account_id: ctx.data.account_id,
+                                    wallet_id: ctx.wallet.id,
+                                    current_keychain_id: ctx.keychain_id,
+                                    bitcoin_tx_id: unsynced_tx.tx_id,
+                                    total_utxo_in_sats: unsynced_tx.total_utxo_in_sats,
+                                    total_utxo_settled_in_sats: settled_sats,
+                                    fee_sats: unsynced_tx.fee_sats,
+                                    cpfp_details: None,
+                                    cpfp_fee_sats: None,
+                                    change_utxos: change_utxos
+                                        .iter()
+                                        .map(|(u, a)| ChangeOutput {
+                                            outpoint: u.outpoint,
+                                            address: a.address.clone().into(),
+                                            satoshis: Satoshis::from(u.txout.value),
+                                        })
+                                        .collect(),
+                                },
+                                confirmation_time: unsynced_tx.confirmation_time.clone(),
+                            },
+                        },
+                    )
+                    .await?;
+            } else {
+                tx.commit().await?;
+            }
+
+            Ok(SpendOutcome::Applied)
+        }
+        SpendDetectedOutcome::AlreadyApplied => {
+            tx.commit().await?;
+            Ok(SpendOutcome::Applied)
+        }
+        SpendDetectedOutcome::Deferred => {
+            // Explicit rollback for readability: dropping sqlx::Transaction also rolls back,
+            // but this makes the deferred control flow obvious to future maintainers.
+            tx.rollback().await?;
+            warn!(
+                message = "spend_detected_deferred",
+                wallet_id = %ctx.wallet.id,
+                keychain_id = %ctx.keychain_id,
+                tx_id = %unsynced_tx.tx_id,
+            );
+            Ok(SpendOutcome::Deferred)
         }
     }
+}
 
-    Ok(())
+async fn maybe_record_batch_broadcast(
+    ctx: &KeychainSyncContext<'_>,
+    unsynced_tx: &UnsyncedTransaction,
+) -> Result<Option<(BatchInfo, LedgerTransactionId)>, JobError> {
+    let Some(BatchBroadcastLedgerTx {
+        tx,
+        batch_info,
+        ledger_tx_id: tx_id,
+        was_newly_set,
+    }) = ctx
+        .batches
+        .set_batch_broadcast_ledger_tx_id(unsynced_tx.tx_id, ctx.wallet.id)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    if was_newly_set {
+        ctx.deps
+            .ledger
+            .batch_broadcast(
+                tx,
+                batch_info.created_ledger_tx_id,
+                tx_id,
+                ctx.fees_to_encumber,
+                ctx.wallet.ledger_account_ids,
+            )
+            .await?;
+    } else {
+        tx.commit().await?;
+    }
+
+    Ok(Some((batch_info, tx_id)))
+}
+
+async fn spend_input_state(
+    ctx: &KeychainSyncContext<'_>,
+    input_outpoints: &[bitcoin::OutPoint],
+) -> Result<SpendInputState, JobError> {
+    let utxos_by_keychain = HashMap::from([(ctx.keychain_id, input_outpoints.to_vec())]);
+    let found = ctx
+        .deps
+        .bria_utxos
+        .list_utxos_by_outpoint(&utxos_by_keychain)
+        .await?;
+
+    if found.len() == input_outpoints.len() {
+        return Ok(SpendInputState::CompleteInputs {
+            income_bria_utxos: found,
+        });
+    }
+
+    let found_outpoints = found
+        .iter()
+        .map(|WalletUtxo { outpoint, .. }| *outpoint)
+        .collect::<HashSet<_>>();
+    let missing_outpoints = input_outpoints
+        .iter()
+        .copied()
+        .filter(|outpoint| !found_outpoints.contains(outpoint))
+        .take(10)
+        .collect::<Vec<_>>();
+
+    Ok(SpendInputState::MissingInputs {
+        expected: input_outpoints.len(),
+        found: found.len(),
+        missing_outpoints,
+    })
 }
 
 // Settles income UTXOs that BDK has confirmed but bria hasn't settled yet.

@@ -16,6 +16,12 @@ pub use entity::*;
 use error::UtxoError;
 use repo::*;
 
+pub enum SpendDetectedOutcome {
+    Applied(Satoshis, HashMap<bitcoin::OutPoint, Satoshis>),
+    AlreadyApplied,
+    Deferred,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum UtxoSelectionMode {
     Payout,
@@ -112,62 +118,60 @@ impl Utxos {
         tx_fee: Satoshis,
         tx_vbytes: u64,
         current_block_height: u32,
-    ) -> Result<Option<(Satoshis, HashMap<bitcoin::OutPoint, Satoshis>)>, UtxoError> {
-        let mut inputs = Vec::new();
-        let mut input_tx_ids = Vec::new();
+    ) -> Result<SpendDetectedOutcome, UtxoError> {
+        let (inputs, input_tx_ids): (Vec<&OutPoint>, Vec<String>) = inputs_iter
+            .map(|input| (input, input.txid.to_string()))
+            .unzip();
 
-        for input in inputs_iter {
-            input_tx_ids.push(input.txid.to_string());
-            inputs.push(input);
-        }
-
-        for (utxo, address) in change_utxos.iter() {
-            let mut new_utxo = NewUtxo::builder()
-                .account_id(account_id)
-                .wallet_id(wallet_id)
-                .keychain_id(keychain_id)
-                .utxo_detected_ledger_tx_id(tx_id)
-                .outpoint(utxo.outpoint)
-                .kind(address.keychain)
-                .address_idx(address.index)
-                .address(address.to_string())
-                .script_hex(format!("{:x}", utxo.txout.script_pubkey))
-                .value(utxo.txout.value)
-                .bdk_spent(utxo.is_spent)
-                .detected_block_height(current_block_height)
-                .origin_tx_vbytes(tx_vbytes)
-                .origin_tx_fee(tx_fee)
-                .self_pay(true)
-                .origin_tx_trusted_input_tx_ids(Some(&input_tx_ids));
-            if let Some((batch_id, payout_queue_id)) = batch {
-                new_utxo = new_utxo
-                    .origin_tx_batch_id(batch_id)
-                    .origin_tx_payout_queue_id(payout_queue_id);
-            }
-
-            let res = self
-                .utxos
-                .persist_utxo(tx, new_utxo.build().expect("Could not build NewUtxo"))
-                .await?;
-            if res.is_none() {
-                return Ok(None);
-            }
-        }
-        let utxos = self
+        let mark_spent_res = self
             .utxos
             .mark_spent(tx, keychain_id, inputs.into_iter(), tx_id)
             .await?;
-        if utxos.is_empty() {
-            return Ok(None);
+        match mark_spent_res {
+            MarkSpentResult::Spent(utxos) => {
+                for (utxo, address) in change_utxos.iter() {
+                    let mut new_utxo = NewUtxo::builder()
+                        .account_id(account_id)
+                        .wallet_id(wallet_id)
+                        .keychain_id(keychain_id)
+                        .utxo_detected_ledger_tx_id(tx_id)
+                        .outpoint(utxo.outpoint)
+                        .kind(address.keychain)
+                        .address_idx(address.index)
+                        .address(address.to_string())
+                        .script_hex(format!("{:x}", utxo.txout.script_pubkey))
+                        .value(utxo.txout.value)
+                        .bdk_spent(utxo.is_spent)
+                        .detected_block_height(current_block_height)
+                        .origin_tx_vbytes(tx_vbytes)
+                        .origin_tx_fee(tx_fee)
+                        .self_pay(true)
+                        .origin_tx_trusted_input_tx_ids(Some(&input_tx_ids));
+                    if let Some((batch_id, payout_queue_id)) = batch {
+                        new_utxo = new_utxo
+                            .origin_tx_batch_id(batch_id)
+                            .origin_tx_payout_queue_id(payout_queue_id);
+                    }
+
+                    self.utxos
+                        .persist_utxo(tx, new_utxo.build().expect("Could not build NewUtxo"))
+                        .await?;
+                }
+
+                let (total_settled_in, allocations) =
+                    effective_allocation::withdraw_from_effective_when_settled(
+                        utxos,
+                        change_utxos.iter().fold(Satoshis::ZERO, |s, (u, _)| {
+                            s + Satoshis::from(u.txout.value)
+                        }),
+                    );
+                Ok(SpendDetectedOutcome::Applied(total_settled_in, allocations))
+            }
+            MarkSpentResult::AlreadySpent => Ok(SpendDetectedOutcome::AlreadyApplied),
+            // Defense-in-depth: inputs were validated earlier in sync_wallet, but state can still
+            // drift between checks due to concurrent retries or manual DB edits.
+            MarkSpentResult::Deferred => Ok(SpendDetectedOutcome::Deferred),
         }
-        let (total_settled_in, allocations) =
-            effective_allocation::withdraw_from_effective_when_settled(
-                utxos,
-                change_utxos.iter().fold(Satoshis::ZERO, |s, (u, _)| {
-                    s + Satoshis::from(u.txout.value)
-                }),
-            );
-        Ok(Some((total_settled_in, allocations)))
     }
 
     #[instrument(name = "utxos.spend_settled", skip(self, tx, inputs), err)]

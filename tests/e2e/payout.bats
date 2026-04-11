@@ -17,12 +17,8 @@ teardown_file() {
 @test "payout: Batch inclusion and payout cancellation" {
   bria_cmd create-payout-queue --name high --interval-trigger 5
   payout_id=$(bria_cmd submit-payout -w default --queue-name high --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 75000000 | jq -r '.id')
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_outgoing) == 75000000 ]] && break;
-    sleep 1
-  done
-  [[ $(cached_encumbered_outgoing) == 75000000 ]] || exit 1
+  retry 60 1 wallet_encumbered_outgoing_is 75000000
+  wallet_encumbered_outgoing_is 75000000 || exit 1
 
   estimated_at=$(bria_cmd get-payout --id ${payout_id} | jq -r '.payout.batchInclusionEstimatedAt')
   [[ "${estimated_at}" != "null" ]] || exit 1
@@ -32,12 +28,8 @@ teardown_file() {
   estimated_at=$(bria_cmd get-payout --id ${payout_id} | jq -r '.payout.batchInclusionEstimatedAt')
   [[ "${estimated_at}" = "null" ]] || exit 1
 
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_outgoing) == 0 ]] && break;
-    sleep 1
-  done
-  [[ $(cached_encumbered_outgoing) == 0 ]] || exit 1;
+  retry 60 1 wallet_encumbered_outgoing_is 0
+  wallet_encumbered_outgoing_is 0 || exit 1
 }
 
 @test "payout: Fund an address and see if the balance is reflected" {
@@ -89,13 +81,8 @@ teardown_file() {
     sleep 1
   done
   [[ "${batch_id}" != "null" ]] || exit 1
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_pending_outgoing) == 150000000 ]] && break;
-    sleep 1
-  done
-
-  [[ $(cached_pending_outgoing) == 150000000 ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is 150000000
+  wallet_pending_outgoing_is 150000000 || exit 1
   [[ $(cached_pending_fees) != 0 ]] || exit 1
   [[ $(cached_encumbered_fees) == 0 ]] || exit 1
 }
@@ -130,23 +117,13 @@ teardown_file() {
     echo "signing_failure_reason: ${signing_failure_reason}"
   fi
 
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_pending_income) != 0 ]] && break;
-    sleep 1
-  done
-
-  [[ $(cached_pending_income) != 0 ]] || exit 1
+  retry 60 1 wallet_pending_income_is_not 0
+  wallet_pending_income_is_not 0 || exit 1
   [[ $(cached_current_settled) == 0 ]] || exit 1
   bitcoin_cli -generate 2
 
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_current_settled) != 0 ]] && break;
-    sleep 1
-  done
-
-  [[ $(cached_current_settled) != 0 ]] || exit 1;
+  retry 60 1 wallet_current_settled_or_pending_outgoing_is_not_zero
+  wallet_current_settled_or_pending_outgoing_is_not_zero || exit 1
 }
 
 @test "payout: Creates a manually triggered payout-queue and triggers it" {
@@ -182,22 +159,13 @@ teardown_file() {
   vout=$(echo ${payout} | jq -r '.vout')
   [[ "${batch_id}" != "null" && "${tx_id}" != "null" && "${vout}" != "null" ]] || exit 1
 
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_pending_income) != 0 ]] && break;
-    echo $(bria_cmd wallet-balance -w default)
-    sleep 1
-  done
-  [[ $(cached_pending_income) != 0 ]] || exit 1
+  retry 60 1 wallet_pending_income_is_not 0
+  wallet_pending_income_is_not 0 || exit 1
 
   bitcoin_cli -generate 2
 
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_pending_income) == 0 ]] && break;
-    sleep 1
-  done
-  [[ $(cached_pending_income) == 0 ]] || exit 1;
+  retry 60 1 wallet_pending_income_is 0
+  wallet_pending_income_is 0 || exit 1
 }
 
 @test "payout: Can send to another wallet" {
@@ -216,12 +184,8 @@ teardown_file() {
 
   [[ "${transfer_metadata}" == "true" ]] || exit 1
 
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_pending_outgoing) == 70000000 ]] && break;
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == 70000000 ]] || exit 1;
+  retry 60 1 wallet_pending_outgoing_is 70000000
+  wallet_pending_outgoing_is 70000000 || exit 1
 }
 
 @test "payout: Can CPFP when enabled in payout queue" {
@@ -244,12 +208,8 @@ teardown_file() {
     --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej \
     --amount 100000
 
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_outgoing) == 100000 ]] && break;
-    sleep 1
-  done
-  [[ $(cached_encumbered_outgoing) == 100000 ]] || exit 1;
+  retry 60 1 wallet_encumbered_outgoing_is 100000
+  wallet_encumbered_outgoing_is 100000 || exit 1
 
   batch_id=$(bria_cmd list-payouts -w default | jq -r '.payouts[0].batchId')
   [[ "${batch_id}" == "null" ]] || exit 1
@@ -264,8 +224,8 @@ teardown_file() {
   done
   [[ "${batch_id}" != "null" ]] || exit 1;
 
-  cache_wallet_balance
-  [[ $(cached_encumbered_outgoing) == 0 ]] && break;
+  retry 60 1 wallet_encumbered_outgoing_is_zero
+  wallet_encumbered_outgoing_is_zero || exit 1
 }
 
 @test "payout: Create and cancel an unsigned batch" {
@@ -284,12 +244,8 @@ teardown_file() {
   payout_id=$(bria_cmd submit-payout -w default --queue-name cancel_queue --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 1300000 | jq -r '.id')
 
   # Wait for payout to be encumbered
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_outgoing) == 1300000 && $(cached_effective_settled) -ge 100000000 ]] && break
-    sleep 2
-  done
-  [[ $(cached_encumbered_outgoing) == 1300000 && $(cached_effective_settled) -ge 100000000 ]] || exit 1
+  retry 60 1 wallet_encumbered_outgoing_is_and_effective_settled_ge 1300000 100000000
+  wallet_encumbered_outgoing_is_and_effective_settled_ge 1300000 100000000 || exit 1
   effective_settled=$(cached_effective_settled)
 
   # Wait for the batch to be created
@@ -338,13 +294,8 @@ teardown_file() {
   [[ $(echo ${batch} | jq -r '.id') == "${batch_id}" && $(echo ${batch} | jq -r '.cancelled') == "true" ]] || exit 1
 
   # Check that the funds are no longer encumbered
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_outgoing) == 0 && $(cached_effective_settled) == ${effective_settled} ]] && break
-    sleep 1
-  done
-  [[ $(cached_encumbered_outgoing) == 0 ]] || exit 1
-  [[ $(cached_effective_settled) == ${effective_settled} ]] || exit 1
+  retry 60 1 wallet_encumbered_outgoing_is_and_effective_settled_is 0 ${effective_settled}
+  wallet_encumbered_outgoing_is_and_effective_settled_is 0 ${effective_settled} || exit 1
 }
 
 @test "payout: Error when try to create and cancel a signed batch" {
@@ -362,12 +313,8 @@ teardown_file() {
   payout_id=$(bria_cmd submit-payout -w default --queue-name cancel_queue --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 1300000 | jq -r '.id')
 
   # Wait for payout to be encumbered
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_outgoing) == 1300000 && $(cached_effective_settled) -ge 100000000 ]] && break
-    sleep 2
-  done
-  [[ $(cached_encumbered_outgoing) == 1300000 && $(cached_effective_settled) -ge 100000000 ]] || exit 1
+  retry 60 1 wallet_encumbered_outgoing_is_and_effective_settled_ge 1300000 100000000
+  wallet_encumbered_outgoing_is_and_effective_settled_ge 1300000 100000000 || exit 1
 
   # Wait for the batch to be created
   for i in {1..20}; do
@@ -388,12 +335,8 @@ teardown_file() {
   [[ "$output" == *"BatchError - Batch is already signed"* ]]
 
   # Check that the funds are no longer encumbered
-  for i in {1..20}; do
-    cache_wallet_balance
-    [[ $(cached_encumbered_outgoing) == 0 ]] && break
-    sleep 1
-  done
-  [[ $(cached_encumbered_outgoing) == 0 ]] || exit 1
+  retry 60 1 wallet_encumbered_outgoing_is 0
+  wallet_encumbered_outgoing_is 0 || exit 1
 
   # Verify the batch is not marked as cancelled
   batch=$(bria_cmd get-batch -b "${batch_id}")
@@ -445,52 +388,27 @@ teardown_file() {
 
   bitcoin_cli -generate 6
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    settled=$(cached_current_settled)
-    echo "Settled balance: ${settled}"
-    [[ "${settled}" -ge "130000000" ]] && break
-    sleep 1
-  done
-  [[ $(cached_current_settled) -ge "130000000" ]] || exit 1
+  retry 60 1 wallet_current_settled_ge 130000000
+  wallet_current_settled_ge 130000000 || exit 1
 
   echo "Creating transaction with 130+ inputs..."
   bitcoind_address=$(bitcoin_cli -regtest getnewaddress)
   bitcoin_signer_cli -named sendall recipients="[\"${bitcoind_address}\"]" fee_rate=1
 
   echo "Waiting for spend to be detected..."
-  for i in {1..60}; do
-    cache_wallet_balance
-    pending=$(cached_pending_outgoing)
-    echo "Pending outgoing: ${pending}"
-    [[ "${pending}" != "0" ]] && break
-    sleep 1
-  done
-
-  cache_wallet_balance
-  echo "Pending outgoing after detection: $(cached_pending_outgoing)"
-  [[ $(cached_pending_outgoing) != "0" ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is_not 0
+  wallet_pending_outgoing_is_not 0 || exit 1
   [[ $(cached_current_settled) == "0" ]] || exit 1
 
   echo "Confirming the spending transaction..."
   bitcoin_cli -generate 6
 
   echo "Waiting for spend to be settled..."
-  for i in {1..120}; do
-    cache_wallet_balance
-    pending=$(cached_pending_outgoing)
-    encumbered=$(cached_encumbered_outgoing)
-    settled=$(cached_current_settled)
-    echo "Pending outgoing: ${pending}, encumbered: ${encumbered}, settled: ${settled}"
-    [[ "${pending}" == "0" ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == "0" ]] || exit 1
+  retry 120 1 wallet_pending_outgoing_is 0
+  wallet_pending_outgoing_is 0 || exit 1
 
-  cache_wallet_balance
-  settled=$(cached_current_settled)
-  echo "Final settled balance: ${settled}"
-  [[ "${settled}" == "0" ]] || exit 1
+  retry 60 1 wallet_current_settled_is 0
+  wallet_current_settled_is 0 || exit 1
 }
 
 @test "payout: Can create payout batch with 120+ inputs without payload error" {
@@ -524,27 +442,15 @@ teardown_file() {
 
   bitcoin_cli -generate 6
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    settled=$(cached_current_settled)
-    echo "Settled balance: ${settled}"
-    [[ "${settled}" == "130000000" ]] && break
-    sleep 1
-  done
-  [[ $(cached_current_settled) == "130000000" ]] || exit 1
+  retry 60 1 wallet_current_settled_is 130000000
+  wallet_current_settled_is 130000000 || exit 1
 
   echo "Submitting payout that will use 130 inputs..."
   destination="bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej"
   payout_id=$(bria_cmd submit-payout -w default --queue-name large-tx-queue --destination ${destination} --amount 125000000 | jq -r '.id')
 
-  for i in {1..60}; do
-    cache_wallet_balance
-    encumbered=$(cached_encumbered_outgoing)
-    echo "Encumbered outgoing: ${encumbered}"
-    [[ "${encumbered}" == "125000000" ]] && break
-    sleep 1
-  done
-  [[ $(cached_encumbered_outgoing) == "125000000" ]] || exit 1
+  retry 60 1 wallet_encumbered_outgoing_is 125000000
+  wallet_encumbered_outgoing_is 125000000 || exit 1
 
   echo "Waiting for batch creation and broadcast..."
   for i in {1..60}; do
@@ -557,35 +463,19 @@ teardown_file() {
   [[ "${batch_id}" != "null" ]] || exit 1
 
   echo "Waiting for spend to be detected..."
-  for i in {1..60}; do
-    cache_wallet_balance
-    pending=$(cached_pending_outgoing)
-    echo "Pending outgoing: ${pending}"
-    [[ "${pending}" != "0" ]] && break
-    sleep 1
-  done
-
-  cache_wallet_balance
-  echo "Pending outgoing after batch broadcast: $(cached_pending_outgoing)"
-  [[ $(cached_pending_outgoing) == "125000000" ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is 125000000
+  wallet_pending_outgoing_is 125000000 || exit 1
   [[ $(cached_encumbered_outgoing) == "0" ]] || exit 1
 
   echo "Confirming the batch transaction..."
   bitcoin_cli -generate 6
 
   echo "Waiting for batch to be settled..."
-  for i in {1..60}; do
-    cache_wallet_balance
-    pending=$(cached_pending_outgoing)
-    echo "Pending outgoing: ${pending}"
-    [[ "${pending}" == "0" ]] && break
-    sleep 1
-  done
-  [[ $(cached_pending_outgoing) == "0" ]] || exit 1
+  retry 60 1 wallet_pending_outgoing_is 0
+  wallet_pending_outgoing_is 0 || exit 1
 
   cache_wallet_balance
   settled=$(cached_current_settled)
-  echo "Final settled balance: ${settled}"
   [[ "${settled}" -gt "0" && "${settled}" -le "5000000" ]] || exit 1
 }
 
@@ -622,12 +512,8 @@ teardown_file() {
   bitcoin_cli -regtest sendtoaddress "${stale_address}" 1
   bitcoin_cli -generate 6
 
-  for i in {1..60}; do
-    cache_wallet_balance default
-    [[ $(cached_current_settled) -ge 100000000 ]] && break
-    sleep 1
-  done
-  [[ $(cached_current_settled) -ge 100000000 ]] || exit 1
+  retry 60 1 wallet_current_settled_ge 100000000
+  wallet_current_settled_ge 100000000 || exit 1
 
   payout_id=$(bria_cmd submit-payout -w default --queue-name stale_signer_queue --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 99000000 | jq -r '.id')
   [[ "${payout_id}" != "null" ]] || exit 1

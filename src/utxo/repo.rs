@@ -7,6 +7,12 @@ use std::collections::{HashMap, HashSet};
 use super::{cpfp::CpfpCandidate, entity::*, error::UtxoError};
 use crate::primitives::{bitcoin::*, *};
 
+pub(super) enum MarkSpentResult {
+    Spent(Vec<SpentUtxo>),
+    AlreadySpent,
+    Deferred,
+}
+
 pub struct ReservableUtxo {
     pub keychain_id: KeychainId,
     #[allow(dead_code)]
@@ -146,7 +152,12 @@ impl UtxoRepo {
         keychain_id: KeychainId,
         utxos: impl Iterator<Item = &OutPoint>,
         tx_id: LedgerTransactionId,
-    ) -> Result<Vec<SpentUtxo>, UtxoError> {
+    ) -> Result<MarkSpentResult, UtxoError> {
+        let input_outpoints: Vec<(String, i32)> = utxos
+            .map(|out| (out.txid.to_string(), out.vout as i32))
+            .collect();
+        let n_inputs = input_outpoints.len();
+
         let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"WITH updated AS ( UPDATE bria_utxos
             SET bdk_spent = true, modified_at = NOW(), spend_detected_ledger_tx_id = "#,
@@ -154,12 +165,10 @@ impl UtxoRepo {
         query_builder.push_bind(tx_id);
         query_builder
             .push("WHERE spend_detected_ledger_tx_id IS NULL AND (keychain_id, tx_id, vout) IN");
-        let mut n_inputs = 0;
-        query_builder.push_tuples(utxos, |mut builder, out| {
-            n_inputs += 1;
+        query_builder.push_tuples(input_outpoints.iter(), |mut builder, (txid, vout)| {
             builder.push_bind(keychain_id);
-            builder.push_bind(out.txid.to_string());
-            builder.push_bind(out.vout as i32);
+            builder.push_bind(txid);
+            builder.push_bind(vout);
         });
         query_builder.push(
             r#"RETURNING tx_id, vout, value, kind, sats_per_vbyte_when_created, CASE WHEN income_settled_ledger_tx_id IS NOT NULL THEN value ELSE 0 END as settled_value )
@@ -170,22 +179,45 @@ impl UtxoRepo {
         );
 
         let query = query_builder.build();
-        let res = query.fetch_all(&mut **tx).await?;
-        Ok(if n_inputs == res.len() {
-            res.into_iter()
-                .map(|row| SpentUtxo {
-                    outpoint: OutPoint {
-                        txid: row.get::<String, _>("tx_id").parse().unwrap(),
-                        vout: row.get::<i32, _>("vout") as u32,
-                    },
-                    value: Satoshis::from(row.get::<rust_decimal::Decimal, _>("value")),
-                    confirmed: row.get("confirmed"),
-                    change_address: row.get("change_address"),
-                })
-                .collect()
+        let updated_rows = query.fetch_all(&mut **tx).await?;
+        let spent_utxos: Vec<SpentUtxo> = updated_rows
+            .into_iter()
+            .map(|row| SpentUtxo {
+                outpoint: OutPoint {
+                    txid: row.get::<String, _>("tx_id").parse().unwrap(),
+                    vout: row.get::<i32, _>("vout") as u32,
+                },
+                value: Satoshis::from(row.get::<rust_decimal::Decimal, _>("value")),
+                confirmed: row.get("confirmed"),
+                change_address: row.get("change_address"),
+            })
+            .collect();
+
+        if spent_utxos.len() == n_inputs {
+            return Ok(MarkSpentResult::Spent(spent_utxos));
+        }
+
+        let mut existing_query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
+            "SELECT COUNT(*) as existing_count FROM bria_utxos WHERE keychain_id = ",
+        );
+        existing_query_builder.push_bind(keychain_id);
+        existing_query_builder.push(" AND (tx_id, vout) IN ");
+        existing_query_builder.push_tuples(input_outpoints.iter(), |mut builder, (txid, vout)| {
+            builder.push_bind(txid);
+            builder.push_bind(vout);
+        });
+
+        let existing_count: i64 = existing_query_builder
+            .build()
+            .fetch_one(&mut **tx)
+            .await?
+            .get("existing_count");
+
+        if existing_count as usize == n_inputs {
+            Ok(MarkSpentResult::AlreadySpent)
         } else {
-            Vec::new()
-        })
+            Ok(MarkSpentResult::Deferred)
+        }
     }
 
     pub async fn settle_utxo(
