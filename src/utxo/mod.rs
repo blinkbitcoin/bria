@@ -119,13 +119,9 @@ impl Utxos {
         tx_vbytes: u64,
         current_block_height: u32,
     ) -> Result<SpendDetectedOutcome, UtxoError> {
-        let mut inputs = Vec::new();
-        let mut input_tx_ids = Vec::new();
-
-        for input in inputs_iter {
-            input_tx_ids.push(input.txid.to_string());
-            inputs.push(input);
-        }
+        let (inputs, input_tx_ids): (Vec<&OutPoint>, Vec<String>) = inputs_iter
+            .map(|input| (input, input.txid.to_string()))
+            .unzip();
 
         let mark_spent_res = self
             .utxos

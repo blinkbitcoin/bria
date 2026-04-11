@@ -25,7 +25,7 @@ use crate::{
     utxo::{error::UtxoError, SpendDetectedOutcome, Utxos, WalletUtxo},
     wallet::*,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncWalletData {
@@ -644,7 +644,7 @@ async fn spend_input_state(
     let found_outpoints = found
         .iter()
         .map(|WalletUtxo { outpoint, .. }| *outpoint)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<HashSet<_>>();
     let missing_outpoints = input_outpoints
         .iter()
         .copied()
