@@ -575,6 +575,9 @@ async fn process_spend_tx(
             Ok(SpendOutcome::Applied)
         }
         SpendDetectedOutcome::Deferred => {
+            // Explicit rollback for readability: dropping sqlx::Transaction also rolls back,
+            // but this makes the deferred control flow obvious to future maintainers.
+            tx.rollback().await?;
             warn!(
                 message = "spend_detected_deferred",
                 wallet_id = %ctx.wallet.id,
@@ -590,7 +593,12 @@ async fn maybe_record_batch_broadcast(
     ctx: &KeychainSyncContext<'_>,
     unsynced_tx: &UnsyncedTransaction,
 ) -> Result<Option<(BatchInfo, LedgerTransactionId)>, JobError> {
-    let Some((tx, batch_info, tx_id, was_newly_set)) = ctx
+    let Some(BatchBroadcastLedgerTx {
+        tx,
+        batch_info,
+        ledger_tx_id: tx_id,
+        was_newly_set,
+    }) = ctx
         .batches
         .set_batch_broadcast_ledger_tx_id(unsynced_tx.tx_id, ctx.wallet.id)
         .await?

@@ -13,7 +13,12 @@ pub struct BatchInfo {
     pub created_ledger_tx_id: LedgerTxId,
 }
 
-pub type BatchBroadcastLedgerTx<'a> = (Transaction<'a, Postgres>, BatchInfo, LedgerTxId, bool);
+pub struct BatchBroadcastLedgerTx<'a> {
+    pub tx: Transaction<'a, Postgres>,
+    pub batch_info: BatchInfo,
+    pub ledger_tx_id: LedgerTxId,
+    pub was_newly_set: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct Batches {
@@ -286,16 +291,16 @@ impl Batches {
         let batch_id = BatchId::from(row.id);
         let payout_queue_id = PayoutQueueId::from(row.payout_queue_id);
         if let Some(ledger_id) = row.ledger_id {
-            return Ok(Some((
+            return Ok(Some(BatchBroadcastLedgerTx {
                 tx,
-                BatchInfo {
+                batch_info: BatchInfo {
                     id: batch_id,
                     payout_queue_id,
                     created_ledger_tx_id,
                 },
-                LedgerTxId::from(ledger_id),
-                false,
-            )));
+                ledger_tx_id: LedgerTxId::from(ledger_id),
+                was_newly_set: false,
+            }));
         }
         let ledger_transaction_id = LedgerTxId::new();
         sqlx::query!(
@@ -310,16 +315,16 @@ impl Batches {
         .execute(&mut *tx)
         .await?;
 
-        Ok(Some((
+        Ok(Some(BatchBroadcastLedgerTx {
             tx,
-            BatchInfo {
+            batch_info: BatchInfo {
                 id: batch_id,
                 payout_queue_id,
                 created_ledger_tx_id,
             },
-            ledger_transaction_id,
-            true,
-        )))
+            ledger_tx_id: ledger_transaction_id,
+            was_newly_set: true,
+        }))
     }
 
     #[instrument(name = "batches.set_batch_cancel_ledger_tx_id", skip(self))]

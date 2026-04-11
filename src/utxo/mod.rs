@@ -171,6 +171,8 @@ impl Utxos {
                 Ok(SpendDetectedOutcome::Applied(total_settled_in, allocations))
             }
             MarkSpentResult::AlreadySpent => Ok(SpendDetectedOutcome::AlreadyApplied),
+            // Defense-in-depth: inputs were validated earlier in sync_wallet, but state can still
+            // drift between checks due to concurrent retries or manual DB edits.
             MarkSpentResult::Deferred => Ok(SpendDetectedOutcome::Deferred),
         }
     }
