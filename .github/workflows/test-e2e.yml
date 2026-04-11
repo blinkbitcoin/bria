@@ -4,10 +4,15 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   integration:
     name: End to End Test
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       id-token: write
       contents: read
