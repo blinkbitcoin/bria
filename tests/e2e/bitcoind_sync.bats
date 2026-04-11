@@ -290,8 +290,8 @@ teardown_file() {
   [[ -n "${broadcast_ledger_id}" && "${broadcast_ledger_id}" != "null" ]] || exit 1
 
   for i in {1..60}; do
-    grep -q "spend_inputs_missing" .e2e-logs && break
+    grep -q "spend_inputs_missing.*\"tx_id\":\"${payout_tx_id}\"" .e2e-logs && break
     sleep 1
   done
-  grep -q "spend_inputs_missing" .e2e-logs || exit 1
+  grep -q "spend_inputs_missing.*\"tx_id\":\"${payout_tx_id}\"" .e2e-logs || exit 1
 }

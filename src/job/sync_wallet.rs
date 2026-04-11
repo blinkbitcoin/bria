@@ -192,6 +192,13 @@ async fn process_unsynced_txs(
             unsynced_tx.inputs.iter().map(|i| i.0.outpoint).collect();
         let is_spend_tx = !input_outpoints.is_empty();
 
+        // Batch broadcast is recorded before input validation intentionally.
+        // During incident recovery, inputs from a prior wallet may not yet be synced
+        // when this tx is first seen. Recording the broadcast ledger entry early ensures
+        // it is not lost; spend accounting is deferred until inputs converge on a later
+        // sync cycle. This creates a temporary window where a broadcast entry exists
+        // without a matching spend_detected entry — this is expected and observable via
+        // the "batch_broadcast_recorded_while_spend_deferred" log event.
         let batch_broadcast_info = if is_spend_tx {
             maybe_record_batch_broadcast(ctx, &unsynced_tx).await?
         } else {
@@ -207,6 +214,18 @@ async fn process_unsynced_txs(
                     found,
                     missing_outpoints,
                 } => {
+                    if let Some((batch_info, batch_broadcast_ledger_tx_id)) =
+                        batch_broadcast_info.as_ref()
+                    {
+                        info!(
+                            message = "batch_broadcast_recorded_while_spend_deferred",
+                            wallet_id = %ctx.wallet.id,
+                            keychain_id = %ctx.keychain_id,
+                            tx_id = %unsynced_tx.tx_id,
+                            batch_id = %batch_info.id,
+                            batch_broadcast_ledger_tx_id = %batch_broadcast_ledger_tx_id,
+                        );
+                    }
                     warn!(
                         message = "spend_inputs_missing",
                         wallet_id = %ctx.wallet.id,
@@ -432,6 +451,7 @@ async fn process_spend_tx(
     };
 
     let mut change_utxos: Vec<(&LocalUtxo, AddressInfo)> = Vec::new();
+    let mut change_addrs = Vec::new();
     for (utxo, path) in change_outputs {
         let address_info = ctx
             .keychain_wallet
@@ -447,10 +467,7 @@ async fn process_spend_tx(
             .metadata(Some(address_metadata(&unsynced_tx.tx_id)))
             .build()
             .expect("Could not build new address in sync wallet");
-        ctx.deps
-            .bria_addresses
-            .persist_if_not_present(&mut tx, found_addr)
-            .await?;
+        change_addrs.push(found_addr);
         change_utxos.push((utxo, address_info));
     }
 
@@ -477,6 +494,13 @@ async fn process_spend_tx(
         .await?;
 
     if let Some((settled_sats, allocations)) = spend_detected {
+        for addr in change_addrs {
+            ctx.deps
+                .bria_addresses
+                .persist_if_not_present(&mut tx, addr)
+                .await?;
+        }
+
         if batch_info.is_none() {
             let reserved_fees = ctx
                 .deps
