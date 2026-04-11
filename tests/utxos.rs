@@ -197,3 +197,173 @@ async fn spend_detected_deferred_when_inputs_missing() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn spend_detected_already_applied_does_not_persist_conflicting_change() -> anyhow::Result<()>
+{
+    let pool = helpers::init_pool().await?;
+    let utxos = Utxos::new(&pool);
+
+    let profile = helpers::create_test_account(&pool).await?;
+    let account_id = profile.account_id;
+    let wallet_id = WalletId::new();
+    let keychain_id = KeychainId::new();
+
+    sqlx::query("INSERT INTO bria_wallets (id, account_id, name) VALUES ($1, $2, $3)")
+        .bind(Uuid::from(wallet_id))
+        .bind(Uuid::from(account_id))
+        .bind(format!("wallet_{}", wallet_id))
+        .execute(&pool)
+        .await?;
+
+    let input_outpoint = OutPoint {
+        txid: "4010e27ff7dc6d9c66a5657e6b3d94b4c4e394d968398d16fefe4637463d194d".parse()?,
+        vout: 0,
+    };
+    let input_local_utxo = LocalUtxo {
+        outpoint: input_outpoint,
+        txout: TxOut {
+            value: 100_000_000u64,
+            script_pubkey: ScriptBuf::new(),
+        },
+        keychain: KeychainKind::External,
+        is_spent: false,
+    };
+    let input_address_info = AddressInfo {
+        index: 0,
+        address: "bcrt1qzg4a08kc2xrp08d9k5jadm78ehf7catp735zn0"
+            .parse::<bdk::bitcoin::Address<bdk::bitcoin::address::NetworkUnchecked>>()?
+            .assume_checked(),
+        keychain: KeychainKind::External,
+    };
+
+    let (_, init_tx) = utxos
+        .new_utxo_detected(
+            account_id,
+            wallet_id,
+            keychain_id,
+            &input_address_info,
+            &input_local_utxo,
+            Satoshis::from(1_000u64),
+            200,
+            false,
+            1,
+        )
+        .await?
+        .expect("input utxo should be inserted");
+    init_tx.commit().await?;
+
+    let change1_outpoint = OutPoint {
+        txid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?,
+        vout: 1,
+    };
+    let change1_local_utxo = LocalUtxo {
+        outpoint: change1_outpoint,
+        txout: TxOut {
+            value: 40_000_000u64,
+            script_pubkey: ScriptBuf::new(),
+        },
+        keychain: KeychainKind::Internal,
+        is_spent: false,
+    };
+    let change1_address_info = AddressInfo {
+        index: 0,
+        address: "bcrt1q6q79yce8vutqzpnwkxr5x8p5kxw5rc0hqqzwym"
+            .parse::<bdk::bitcoin::Address<bdk::bitcoin::address::NetworkUnchecked>>()?
+            .assume_checked(),
+        keychain: KeychainKind::Internal,
+    };
+    let change1_utxos: Vec<(&LocalUtxo, AddressInfo)> =
+        vec![(&change1_local_utxo, change1_address_info)];
+
+    let mut tx = pool.begin().await?;
+    let first = utxos
+        .spend_detected(
+            &mut tx,
+            account_id,
+            wallet_id,
+            keychain_id,
+            LedgerTransactionId::new(),
+            std::iter::once(&input_outpoint),
+            &change1_utxos,
+            None,
+            Satoshis::from(300u64),
+            200,
+            1,
+        )
+        .await?;
+    assert!(matches!(first, SpendDetectedOutcome::Applied(..)));
+    tx.commit().await?;
+
+    let change2_outpoint = OutPoint {
+        txid: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".parse()?,
+        vout: 2,
+    };
+    let change2_local_utxo = LocalUtxo {
+        outpoint: change2_outpoint,
+        txout: TxOut {
+            value: 30_000_000u64,
+            script_pubkey: ScriptBuf::new(),
+        },
+        keychain: KeychainKind::Internal,
+        is_spent: false,
+    };
+    let change2_address = "bcrt1qcv9xq3me73wsv4scy6qvx3f24e3dnt56h9m9z6";
+    let change2_address_info = AddressInfo {
+        index: 1,
+        address: change2_address
+            .parse::<bdk::bitcoin::Address<bdk::bitcoin::address::NetworkUnchecked>>()?
+            .assume_checked(),
+        keychain: KeychainKind::Internal,
+    };
+    let change2_utxos: Vec<(&LocalUtxo, AddressInfo)> =
+        vec![(&change2_local_utxo, change2_address_info)];
+
+    let mut tx = pool.begin().await?;
+    let second = utxos
+        .spend_detected(
+            &mut tx,
+            account_id,
+            wallet_id,
+            keychain_id,
+            LedgerTransactionId::new(),
+            std::iter::once(&input_outpoint),
+            &change2_utxos,
+            None,
+            Satoshis::from(350u64),
+            220,
+            1,
+        )
+        .await?;
+    assert!(matches!(second, SpendDetectedOutcome::AlreadyApplied));
+    tx.commit().await?;
+
+    let c2_utxo_count: i64 = sqlx::query(
+        "SELECT COUNT(*) AS count FROM bria_utxos WHERE keychain_id = $1 AND tx_id = $2 AND vout = $3",
+    )
+    .bind(keychain_id)
+    .bind(change2_outpoint.txid.to_string())
+    .bind(change2_outpoint.vout as i32)
+    .fetch_one(&pool)
+    .await?
+    .get("count");
+    assert_eq!(
+        c2_utxo_count, 0,
+        "conflicting change utxo must not be persisted"
+    );
+
+    let c2_addr_count: i64 = sqlx::query(
+        "SELECT COUNT(*) AS count FROM bria_addresses WHERE account_id = $1 AND address = $2",
+    )
+    .bind(account_id)
+    .bind(change2_address)
+    .fetch_one(&pool)
+    .await?
+    .get("count");
+    assert_eq!(
+        c2_addr_count, 0,
+        "conflicting change address must not be persisted"
+    );
+
+    Ok(())
+}

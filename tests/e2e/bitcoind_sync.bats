@@ -295,3 +295,89 @@ teardown_file() {
   done
   grep -q "spend_inputs_missing.*\"tx_id\":\"${payout_tx_id}\"" .e2e-logs || exit 1
 }
+
+@test "bitcoind_signer_sync: AlreadyApplied spend path does not persist conflicting change state" {
+  cache_wallet_balance
+  initial_settled=$(cached_current_settled)
+  fund_btc_each="1"
+  fund_sats_each=$(convert_btc_to_sats "${fund_btc_each}")
+  expected_funding_sats=$(( fund_sats_each * 2 ))
+  target_settled=$(( initial_settled + expected_funding_sats ))
+  queue_name="already_applied_manual_$RANDOM"
+
+  bria_cmd set-signer-config \
+    --xpub "68bfb290" bitcoind \
+    --endpoint "${BITCOIND_SIGNER_ENDPOINT}" \
+    --rpc-user "rpcuser" \
+    --rpc-password "invalidpassword"
+
+  bria_cmd create-payout-queue -n "${queue_name}" -m true
+
+  bria_address=$(bria_cmd new-address -w default | jq -r '.address')
+  bitcoin_cli -regtest sendtoaddress "${bria_address}" "${fund_btc_each}"
+  bitcoin_cli -regtest sendtoaddress "${bria_address}" "${fund_btc_each}"
+  bitcoin_cli -generate 6
+
+  for i in {1..60}; do
+    cache_wallet_balance
+    [[ $(cached_current_settled) -ge ${target_settled} ]] && break
+    sleep 1
+  done
+  [[ $(cached_current_settled) -ge ${target_settled} ]] || exit 1
+
+  funded_delta=$(( $(cached_current_settled) - initial_settled ))
+  [[ ${funded_delta} -ge ${expected_funding_sats} ]] || exit 1
+  payout_amount=$(( funded_delta * 60 / 100 ))
+  [[ ${payout_amount} -gt 0 ]] || exit 1
+
+  payout_id=$(bria_cmd submit-payout -w default --queue-name "${queue_name}" --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount "${payout_amount}" | jq -r '.id')
+  [[ "${payout_id}" != "null" ]] || exit 1
+
+  for i in {1..40}; do
+    bria_cmd trigger-payout-queue --name "${queue_name}"
+    batch_id=$(bria_cmd get-payout -i "${payout_id}" | jq -r '.payout.batchId')
+    [[ "${batch_id}" != "null" ]] && break
+    sleep 1
+  done
+  [[ "${batch_id}" != "null" ]] || exit 1
+
+  reserved_count=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT COUNT(*) FROM bria_utxos WHERE spending_batch_id = '${batch_id}'" | tr -d '[:space:]')
+  [[ "${reserved_count}" -ge 1 ]] || exit 1
+
+  docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -c "UPDATE bria_utxos SET spend_detected_ledger_tx_id = gen_random_uuid(), bdk_spent = true WHERE spending_batch_id = '${batch_id}'" > /dev/null
+
+  bria_cmd set-signer-config \
+    --xpub "68bfb290" bitcoind \
+    --endpoint "${BITCOIND_SIGNER_ENDPOINT}" \
+    --rpc-user "rpcuser" \
+    --rpc-password "rpcpassword"
+
+  for i in {1..40}; do
+    payout_tx_id=$(bria_cmd get-payout -i "${payout_id}" | jq -r '.payout.txId')
+    [[ "${payout_tx_id}" != "null" ]] && break
+    sleep 1
+  done
+  [[ "${payout_tx_id}" != "null" ]] || exit 1
+
+  for i in {1..90}; do
+    synced_flag=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT synced_to_bria::int FROM bdk_transactions WHERE tx_id = '${payout_tx_id}' ORDER BY modified_at DESC LIMIT 1" | tr -d '[:space:]')
+    [[ "${synced_flag}" == "1" ]] && break
+    sleep 1
+  done
+  [[ "${synced_flag}" == "1" ]] || exit 1
+
+  for i in {1..60}; do
+    broadcast_ledger_id=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT batch_broadcast_ledger_tx_id::text FROM bria_batch_wallet_summaries WHERE batch_id = '${batch_id}' LIMIT 1" | tr -d '[:space:]')
+    [[ -n "${broadcast_ledger_id}" && "${broadcast_ledger_id}" != "null" ]] && break
+    sleep 1
+  done
+  [[ -n "${broadcast_ledger_id}" && "${broadcast_ledger_id}" != "null" ]] || exit 1
+
+  payout_utxo_count=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT COUNT(*) FROM bria_utxos WHERE tx_id = '${payout_tx_id}'" | tr -d '[:space:]')
+  [[ "${payout_utxo_count}" -eq 0 ]] || exit 1
+
+  payout_addr_event_count=$(docker exec "${COMPOSE_PROJECT_NAME}-postgres-1" psql "${PG_CON}" -t -A -c "SELECT COUNT(*) FROM bria_address_events WHERE event_type = 'metadata_updated' AND event->'metadata'->>'synced_in_tx' = '${payout_tx_id}'" | tr -d '[:space:]')
+  [[ "${payout_addr_event_count}" -eq 0 ]] || exit 1
+
+  ! grep -q "spend_inputs_missing.*\"tx_id\":\"${payout_tx_id}\"" .e2e-logs
+}

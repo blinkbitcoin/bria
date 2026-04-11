@@ -127,40 +127,41 @@ impl Utxos {
             inputs.push(input);
         }
 
-        for (utxo, address) in change_utxos.iter() {
-            let mut new_utxo = NewUtxo::builder()
-                .account_id(account_id)
-                .wallet_id(wallet_id)
-                .keychain_id(keychain_id)
-                .utxo_detected_ledger_tx_id(tx_id)
-                .outpoint(utxo.outpoint)
-                .kind(address.keychain)
-                .address_idx(address.index)
-                .address(address.to_string())
-                .script_hex(format!("{:x}", utxo.txout.script_pubkey))
-                .value(utxo.txout.value)
-                .bdk_spent(utxo.is_spent)
-                .detected_block_height(current_block_height)
-                .origin_tx_vbytes(tx_vbytes)
-                .origin_tx_fee(tx_fee)
-                .self_pay(true)
-                .origin_tx_trusted_input_tx_ids(Some(&input_tx_ids));
-            if let Some((batch_id, payout_queue_id)) = batch {
-                new_utxo = new_utxo
-                    .origin_tx_batch_id(batch_id)
-                    .origin_tx_payout_queue_id(payout_queue_id);
-            }
-
-            self.utxos
-                .persist_utxo(tx, new_utxo.build().expect("Could not build NewUtxo"))
-                .await?;
-        }
         let mark_spent_res = self
             .utxos
             .mark_spent(tx, keychain_id, inputs.into_iter(), tx_id)
             .await?;
         match mark_spent_res {
             MarkSpentResult::Spent(utxos) => {
+                for (utxo, address) in change_utxos.iter() {
+                    let mut new_utxo = NewUtxo::builder()
+                        .account_id(account_id)
+                        .wallet_id(wallet_id)
+                        .keychain_id(keychain_id)
+                        .utxo_detected_ledger_tx_id(tx_id)
+                        .outpoint(utxo.outpoint)
+                        .kind(address.keychain)
+                        .address_idx(address.index)
+                        .address(address.to_string())
+                        .script_hex(format!("{:x}", utxo.txout.script_pubkey))
+                        .value(utxo.txout.value)
+                        .bdk_spent(utxo.is_spent)
+                        .detected_block_height(current_block_height)
+                        .origin_tx_vbytes(tx_vbytes)
+                        .origin_tx_fee(tx_fee)
+                        .self_pay(true)
+                        .origin_tx_trusted_input_tx_ids(Some(&input_tx_ids));
+                    if let Some((batch_id, payout_queue_id)) = batch {
+                        new_utxo = new_utxo
+                            .origin_tx_batch_id(batch_id)
+                            .origin_tx_payout_queue_id(payout_queue_id);
+                    }
+
+                    self.utxos
+                        .persist_utxo(tx, new_utxo.build().expect("Could not build NewUtxo"))
+                        .await?;
+                }
+
                 let (total_settled_in, allocations) =
                     effective_allocation::withdraw_from_effective_when_settled(
                         utxos,
