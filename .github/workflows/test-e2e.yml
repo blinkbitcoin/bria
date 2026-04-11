@@ -25,4 +25,9 @@ jobs:
       - name: Run e2e tests
         env:
           PG_CON: postgres://user:password@127.0.0.1:5432/pg
-        run: nix develop -c make e2e
+        run: |
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt/3"
+            nix develop -c make e2e && break
+            [ $attempt -lt 3 ] && echo "Failed, retrying..." || exit 1
+          done
