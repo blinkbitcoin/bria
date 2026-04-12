@@ -206,6 +206,36 @@ e2e_create_default_wallet_pair() {
   E2E_SIGNER_XPUB_REF=$(bria_cmd list-xpubs | jq -r --arg xpub "${signer_xpub}" --arg fp "${E2E_SIGNER_XPUB_REF}" '([.xpubs[] | select(.xpub == $xpub) | .id][0]) // ([.xpubs[] | select(.id == $fp or .name == $fp or (.id | startswith($fp))) | .id][0]) // $fp')
 }
 
+e2e_ensure_default_signer_wallet_loaded() {
+  if [[ -z "${E2E_BITCOIND_SIGNER_WALLET:-}" ]]; then
+    return
+  fi
+
+  if bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" getwalletinfo >/dev/null 2>&1; then
+    BITCOIND_SIGNER_ENDPOINT="$(e2e_bitcoind_signer_endpoint "${E2E_BITCOIND_SIGNER_WALLET}")"
+    return
+  fi
+
+  bitcoin_signer_cli loadwallet "${E2E_BITCOIND_SIGNER_WALLET}" >/dev/null 2>&1 || true
+
+  if ! bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" getwalletinfo >/dev/null 2>&1; then
+    docker exec "${COMPOSE_PROJECT_NAME}-bitcoind-signer-1" bitcoin-cli createwallet "${E2E_BITCOIND_SIGNER_WALLET}" >/dev/null 2>&1 || true
+    if [[ -n "${E2E_SIGNER_EXTERNAL_DESCRIPTOR:-}" && -n "${E2E_SIGNER_INTERNAL_DESCRIPTOR:-}" ]]; then
+      local descriptor_payload
+      descriptor_payload=$(jq -cn \
+        --arg ext "${E2E_SIGNER_EXTERNAL_DESCRIPTOR}" \
+        --arg int "${E2E_SIGNER_INTERNAL_DESCRIPTOR}" \
+        '[
+          {"desc": $ext, "active": true, "timestamp": 0},
+          {"desc": $int, "active": true, "internal": true, "timestamp": 0}
+        ]')
+      bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" importdescriptors "${descriptor_payload}" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  BITCOIND_SIGNER_ENDPOINT="$(e2e_bitcoind_signer_endpoint "${E2E_BITCOIND_SIGNER_WALLET}")"
+}
+
 e2e_create_multisig_wallet_set() {
   E2E_BITCOIND_SIGNER_WALLET="$(e2e_scoped_name signer_multisig)"
   E2E_BITCOIND_SIGNER_WALLET_2="$(e2e_scoped_name signer_multisig2)"
@@ -256,6 +286,8 @@ e2e_load_context() {
   local context_file
   context_file="$(e2e_context_file)"
   source "${context_file}"
+
+  e2e_ensure_default_signer_wallet_loaded
 }
 
 start_daemon() {
