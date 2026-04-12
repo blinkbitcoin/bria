@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM bdk_transactions\n            WHERE keychain_id = $1 AND  tx_id = $2 AND NOT EXISTS (\n                SELECT 1 FROM bdk_utxos WHERE keychain_id = $1 AND tx_id = $2\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "811b1902d8fa4077c144f078436efc38444bd3f28730df5f06545717700c979c"
+}

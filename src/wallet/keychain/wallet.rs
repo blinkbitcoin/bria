@@ -1,6 +1,6 @@
 use bdk::{
     blockchain::{GetHeight, WalletSync},
-    database::BatchDatabase,
+    database::{BatchDatabase, Database},
     wallet::{signer::SignOptions, AddressIndex},
     Wallet,
 };
@@ -106,8 +106,21 @@ impl KeychainWallet {
         &self,
         blockchain: B,
     ) -> Result<(), BdkError> {
-        self.with_wallet(move |wallet| wallet.sync(&blockchain, Default::default()))
-            .await??;
+        self.with_wallet(move |wallet| {
+            let last_external = wallet
+                .database()
+                .get_last_index(KeychainKind::External)?
+                .unwrap_or(0);
+            let last_internal = wallet
+                .database()
+                .get_last_index(KeychainKind::Internal)?
+                .unwrap_or(0);
+            let max_last_index = last_external.max(last_internal);
+
+            let _ = wallet.ensure_addresses_cached(max_last_index.saturating_add(1))?;
+            wallet.sync(&blockchain, Default::default())
+        })
+        .await??;
         Ok(())
     }
 

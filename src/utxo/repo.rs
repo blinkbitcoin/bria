@@ -336,6 +336,9 @@ impl UtxoRepo {
         fee_rate: bitcoin::FeeRate,
         utxos: impl IntoIterator<Item = (KeychainId, OutPoint)>,
     ) -> Result<(), UtxoError> {
+        let utxos: Vec<_> = utxos.into_iter().collect();
+        let expected = utxos.len();
+
         let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
             r#"UPDATE bria_utxos
             SET spending_batch_id = "#,
@@ -347,11 +350,14 @@ impl UtxoRepo {
         query_builder.push_bind(fee_rate.as_sat_per_vb());
         query_builder.push("WHERE account_id = ");
         query_builder.push_bind(account_id);
+        query_builder.push(" AND (spending_batch_id IS NULL OR spending_batch_id = ");
+        query_builder.push_bind(batch_id);
+        query_builder.push(")");
         query_builder.push(" AND (keychain_id, tx_id, vout) IN");
         query_builder.push_tuples(
             utxos
-                .into_iter()
-                .map(|(keychain_id, utxo)| (keychain_id, utxo.txid.to_string(), utxo.vout as i32)),
+                .iter()
+                .map(|(keychain_id, utxo)| (*keychain_id, utxo.txid.to_string(), utxo.vout as i32)),
             |mut builder, (keychain_id, tx_id, vout)| {
                 builder.push_bind(keychain_id);
                 builder.push_bind(tx_id);
@@ -360,7 +366,11 @@ impl UtxoRepo {
         );
 
         let query = query_builder.build();
-        query.execute(&mut **tx).await?;
+        let result = query.execute(&mut **tx).await?;
+        let reserved = result.rows_affected() as usize;
+        if reserved != expected {
+            return Err(UtxoError::ReserveUtxosMismatch { expected, reserved });
+        }
         Ok(())
     }
 

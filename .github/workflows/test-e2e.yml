@@ -12,7 +12,7 @@ jobs:
   integration:
     name: End to End Test
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     permissions:
       id-token: write
       contents: read

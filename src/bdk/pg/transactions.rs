@@ -313,7 +313,7 @@ impl Transactions {
     ) -> Result<(), BdkError> {
         sqlx::query!(
             r#"
-            DELETE FROM bdk_transactions 
+            DELETE FROM bdk_transactions
             WHERE keychain_id = $1 AND  tx_id = $2 AND NOT EXISTS (
                 SELECT 1 FROM bdk_utxos WHERE keychain_id = $1 AND tx_id = $2
             )
