@@ -208,17 +208,24 @@ e2e_create_default_wallet_pair() {
 
 e2e_ensure_default_signer_wallet_loaded() {
   if [[ -z "${E2E_BITCOIND_SIGNER_WALLET:-}" ]]; then
+    echo "[e2e] signer wallet var is empty, skipping load guard" >&3
     return
   fi
+
+  echo "[e2e] ensure signer wallet loaded: ${E2E_BITCOIND_SIGNER_WALLET}" >&3
+  echo "[e2e] signer wallets before: $(bitcoin_signer_cli listwallets 2>/dev/null || true)" >&3
 
   if bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" getwalletinfo >/dev/null 2>&1; then
     BITCOIND_SIGNER_ENDPOINT="$(e2e_bitcoind_signer_endpoint "${E2E_BITCOIND_SIGNER_WALLET}")"
+    echo "[e2e] signer wallet already loaded, endpoint=${BITCOIND_SIGNER_ENDPOINT}" >&3
     return
   fi
 
+  echo "[e2e] loading signer wallet ${E2E_BITCOIND_SIGNER_WALLET}" >&3
   bitcoin_signer_cli loadwallet "${E2E_BITCOIND_SIGNER_WALLET}" >/dev/null 2>&1 || true
 
   if ! bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" getwalletinfo >/dev/null 2>&1; then
+    echo "[e2e] signer wallet not available after load, creating/importing descriptors" >&3
     docker exec "${COMPOSE_PROJECT_NAME}-bitcoind-signer-1" bitcoin-cli createwallet "${E2E_BITCOIND_SIGNER_WALLET}" >/dev/null 2>&1 || true
     if [[ -n "${E2E_SIGNER_EXTERNAL_DESCRIPTOR:-}" && -n "${E2E_SIGNER_INTERNAL_DESCRIPTOR:-}" ]]; then
       local descriptor_payload
@@ -234,6 +241,8 @@ e2e_ensure_default_signer_wallet_loaded() {
   fi
 
   BITCOIND_SIGNER_ENDPOINT="$(e2e_bitcoind_signer_endpoint "${E2E_BITCOIND_SIGNER_WALLET}")"
+  echo "[e2e] signer wallets after: $(bitcoin_signer_cli listwallets 2>/dev/null || true)" >&3
+  echo "[e2e] signer endpoint after ensure: ${BITCOIND_SIGNER_ENDPOINT}" >&3
 }
 
 e2e_create_multisig_wallet_set() {

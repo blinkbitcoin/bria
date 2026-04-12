@@ -106,6 +106,7 @@ setup() {
   [[ $(cached_pending_income) == 0 ]] || exit 1
 
   e2e_ensure_default_signer_wallet_loaded
+  echo "[payout] set-signer-config wallet=${E2E_BITCOIND_SIGNER_WALLET} endpoint=$(e2e_bitcoind_signer_endpoint)" >&3
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -121,6 +122,8 @@ setup() {
     signing_failure_reason=$(bria_cmd get-batch -b "${batch_id}" | jq -r '.signingSessions[0].failureReason')
     echo "signing_status: ${signing_status}"
     echo "signing_failure_reason: ${signing_failure_reason}"
+    echo "[payout] signer wallets now: $(bitcoin_signer_cli listwallets 2>/dev/null || true)" >&3
+    echo "[payout] endpoint now: $(e2e_bitcoind_signer_endpoint)" >&3
   fi
 
   retry 60 1 wallet_pending_income_is_not 0 "${E2E_BRIA_WALLET}"
