@@ -3,65 +3,64 @@
 load "helpers"
 
 setup_file() {
-  restart_bitcoin_stack
-  reset_pg
-  bitcoind_init multisig
-  start_daemon
-  bria_init multisig
+  e2e_init_file_context
+  e2e_create_multisig_wallet_set
+  E2E_QUEUE_HIGH="$(e2e_queue_name high)"
+  e2e_save_context
 }
 
-teardown_file() {
-  stop_daemon
+setup() {
+  e2e_load_context
 }
 
 @test "multisig_payout: Fund an address and see if the balance is reflected" {
-  bria_address=$(bria_cmd new-address -w multisig | jq -r '.address')
+  bria_address=$(bria_cmd new-address -w "${E2E_BRIA_WALLET}" | jq -r '.address')
   
   if [ -z "$bria_address" ]; then
     echo "Failed to get a new address"
     exit 1
   fi
 
-  bitcoin_cli -regtest sendtoaddress ${bria_address} 1
+  external_wallet_send_to_address "${bria_address}" 1
 
   for i in {1..60}; do
-    n_utxos=$(bria_cmd list-utxos -w multisig | jq '.keychains[0].utxos | length')
+    n_utxos=$(bria_cmd list-utxos -w "${E2E_BRIA_WALLET}" | jq '.keychains[0].utxos | length')
     [[ "${n_utxos}" == "1" ]] && break
     sleep 1
   done
 
-  cache_wallet_balance multisig
+  cache_wallet_balance "${E2E_BRIA_WALLET}"
   [[ $(cached_encumbered_fees) != 0 ]] || exit 1
   [[ $(cached_pending_income) == 100000000 ]] || exit 1;
 }
 
 @test "multisig_payout: Fund a change address and see if the balance is reflected" {
-  bitcoind_signer_address=$(bitcoin_signer_cli -rpcwallet=multisig getrawchangeaddress)
+  bitcoind_signer_address=$(bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" getrawchangeaddress)
 
-  bitcoin_cli -regtest sendtoaddress ${bitcoind_signer_address} 1
+  external_wallet_send_to_address "${bitcoind_signer_address}" 1
 
   for i in {1..60}; do
-    n_change_utxos=$(bria_cmd list-utxos -w multisig | jq '.keychains[0].utxos | map(select(.changeOutput == true)) | length')
+    n_change_utxos=$(bria_cmd list-utxos -w "${E2E_BRIA_WALLET}" | jq '.keychains[0].utxos | map(select(.changeOutput == true)) | length')
     [[ "${n_change_utxos}" == "1" ]] && break
     sleep 1
   done
 
-  cache_wallet_balance multisig
+  cache_wallet_balance "${E2E_BRIA_WALLET}"
   echo $(cached_pending_income)
   [[ $(cached_encumbered_fees) != 0 ]] || exit 1
   [[ $(cached_pending_income) == 200000000 ]] || exit 1;
 }
 
 @test "mutlisig_payout: Create payout queue and have a queued payout on it" {
-  bria_cmd create-payout-queue --name high --interval-trigger 5
-  bria_cmd submit-payout --wallet multisig --queue-name high --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 175000000
+  bria_cmd create-payout-queue --name "${E2E_QUEUE_HIGH}" --interval-trigger 5
+  bria_cmd submit-payout --wallet "${E2E_BRIA_WALLET}" --queue-name "${E2E_QUEUE_HIGH}" --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 175000000
 
-  n_payouts=$(bria_cmd list-payouts -w multisig | jq '.payouts | length')
+  n_payouts=$(bria_cmd list-payouts -w "${E2E_BRIA_WALLET}" | jq '.payouts | length')
   [[ "${n_payouts}" == "1" ]] || exit 1
-  batch_id=$(bria_cmd list-payouts -w multisig | jq '.payouts[0].batchId')
+  batch_id=$(bria_cmd list-payouts -w "${E2E_BRIA_WALLET}" | jq '.payouts[0].batchId')
   [[ "${batch_id}" == "null" ]] || exit 1
 
-  cache_wallet_balance multisig
+  cache_wallet_balance "${E2E_BRIA_WALLET}"
   [[ $(cached_encumbered_outgoing) == 175000000 && $(cached_pending_outgoing) == 0 ]] || exit 1
 }
 
@@ -69,7 +68,7 @@ teardown_file() {
   bitcoin_cli -generate 5
 
   for i in {1..20}; do
-    batch_id=$(bria_cmd list-payouts -w multisig | jq -r '.payouts[0].batchId')
+    batch_id=$(bria_cmd list-payouts -w "${E2E_BRIA_WALLET}" | jq -r '.payouts[0].batchId')
     [[ "${batch_id}" != "null" ]] && break
     sleep 1
   done
@@ -77,11 +76,11 @@ teardown_file() {
   [[ "${batch_id}" != "null" ]] || exit 1
 
   unsigned_psbt=$(bria_cmd get-batch -b "${batch_id}" | jq -r '.unsignedPsbt')
-  signed_psbt=$(bitcoin_signer_cli -rpcwallet=multisig walletprocesspsbt "${unsigned_psbt}" true ALL true | jq -r '.psbt')
-  bria_cmd submit-signed-psbt -b "${batch_id}" -x key1 -s "${signed_psbt}"
+  signed_psbt=$(bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" walletprocesspsbt "${unsigned_psbt}" true ALL true | jq -r '.psbt')
+  bria_cmd submit-signed-psbt -b "${batch_id}" -x "${E2E_MULTISIG_KEY_1}" -s "${signed_psbt}"
   bria_cmd set-signer-config \
-    --xpub key2 bitcoind \
-    --endpoint "${BITCOIND_SIGNER_ENDPOINT}"/wallet/multisig2 \
+    --xpub "${E2E_MULTISIG_KEY_2}" bitcoind \
+    --endpoint "$(e2e_bitcoind_signer_endpoint "${E2E_BITCOIND_SIGNER_WALLET_2}")" \
     --rpc-user "rpcuser" \
     --rpc-password "rpcpassword"
   
@@ -97,39 +96,41 @@ teardown_file() {
     echo "signing_failure_reason: ${signing_failure_reason}"
   fi
 
-  retry 60 1 wallet_pending_income_is_not 0 multisig
-  wallet_pending_income_is_not 0 multisig || exit 1
+  retry 60 1 wallet_pending_income_is_not 0 "${E2E_BRIA_WALLET}"
+  wallet_pending_income_is_not 0 "${E2E_BRIA_WALLET}" || exit 1
   [[ $(cached_current_settled) == 0 ]] || exit 1
   bitcoin_cli -generate 2
 
-  retry 60 1 wallet_current_settled_is_not 0 multisig
-  wallet_current_settled_is_not 0 multisig || exit 1
+  retry 60 1 wallet_current_settled_is_not 0 "${E2E_BRIA_WALLET}"
+  wallet_current_settled_is_not 0 "${E2E_BRIA_WALLET}" || exit 1
 }
 
 @test "multisig_payout: Broadcast a txn using bitcoind and check if balance updated" {
-  bria_address=$(bria_cmd new-address -w multisig | jq -r '.address')
-  bitcoin_cli -regtest sendtoaddress ${bria_address} 1 
+  bria_address=$(bria_cmd new-address -w "${E2E_BRIA_WALLET}" | jq -r '.address')
+  external_wallet_send_to_address "${bria_address}" 1 
   bitcoin_cli -generate 5
 
-  bria_cmd submit-payout --wallet multisig --queue-name high --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 75000000
+  bria_cmd submit-payout --wallet "${E2E_BRIA_WALLET}" --queue-name "${E2E_QUEUE_HIGH}" --destination bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej --amount 75000000
   for i in {1..20}; do
-    batch_id=$(bria_cmd list-payouts -w multisig | jq -r '.payouts[0].batchId')
+    batch_id=$(bria_cmd list-payouts -w "${E2E_BRIA_WALLET}" | jq -r '.payouts[0].batchId')
     [[ "${batch_id}" != "null" ]] && break
     sleep 1
   done
   [[ "${batch_id}" != "null" ]] || exit 1
 
   unsigned_psbt=$(bria_cmd get-batch -b "${batch_id}" | jq -r '.unsignedPsbt')
-  signed_psbt=$(bitcoin_signer_cli -rpcwallet=multisig walletprocesspsbt "${unsigned_psbt}" true ALL true | jq -r '.psbt')
-  signed_psbt2=$(bitcoin_signer_cli -rpcwallet=multisig2 walletprocesspsbt "${signed_psbt}" true ALL true | jq -r '.psbt')
+  signed_psbt=$(bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" walletprocesspsbt "${unsigned_psbt}" true ALL true | jq -r '.psbt')
+  signed_psbt2=$(bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET_2}" walletprocesspsbt "${signed_psbt}" true ALL true | jq -r '.psbt')
   hex=$(bitcoin_cli finalizepsbt "${signed_psbt2}" true | jq -r '.hex')
-  bitcoin_cli sendrawtransaction "${hex}"
+  txid=$(bitcoin_cli sendrawtransaction "${hex}")
+  retry 20 1 bitcoin_mempool_has_tx "${txid}"
+  bitcoin_mempool_has_tx "${txid}" || exit 1
 
-  retry 60 1 wallet_pending_income_is_not 0 multisig
-  wallet_pending_income_is_not 0 multisig || exit 1
+  retry 60 1 wallet_pending_income_is_not 0 "${E2E_BRIA_WALLET}"
+  wallet_pending_income_is_not 0 "${E2E_BRIA_WALLET}" || exit 1
  
   bitcoin_cli -generate 2 
 
-  retry 60 1 wallet_pending_income_is 0 multisig
-  wallet_pending_income_is 0 multisig || exit 1
+  retry 60 1 wallet_pending_income_is 0 "${E2E_BRIA_WALLET}"
+  wallet_pending_income_is 0 "${E2E_BRIA_WALLET}" || exit 1
 }
