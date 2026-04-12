@@ -105,6 +105,7 @@ setup() {
   cache_wallet_balance "${E2E_BRIA_WALLET}"
   [[ $(cached_pending_income) == 0 ]] || exit 1
 
+  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -240,6 +241,7 @@ setup() {
 
 @test "payout: Create and cancel an unsigned batch" {
   # invalidates signer to allow cancel the batch
+  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -313,6 +315,7 @@ setup() {
 }
 
 @test "payout: Error when try to create and cancel a signed batch" {
+  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -427,6 +430,7 @@ setup() {
 }
 
 @test "payout: Can create payout batch with 120+ inputs without payload error" {
+  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -499,6 +503,7 @@ setup() {
   bitcoin_signer_cli -named sendall recipients="[\"bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej\"]" fee_rate=1 || true
   bitcoin_cli -generate 6
 
+  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
