@@ -105,8 +105,6 @@ setup() {
   cache_wallet_balance "${E2E_BRIA_WALLET}"
   [[ $(cached_pending_income) == 0 ]] || exit 1
 
-  e2e_ensure_default_signer_wallet_loaded
-  echo "[payout] set-signer-config wallet=${E2E_BITCOIND_SIGNER_WALLET} endpoint=$(e2e_bitcoind_signer_endpoint)" >&3
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -122,8 +120,6 @@ setup() {
     signing_failure_reason=$(bria_cmd get-batch -b "${batch_id}" | jq -r '.signingSessions[0].failureReason')
     echo "signing_status: ${signing_status}"
     echo "signing_failure_reason: ${signing_failure_reason}"
-    echo "[payout] signer wallets now: $(bitcoin_signer_cli listwallets 2>/dev/null || true)" >&3
-    echo "[payout] endpoint now: $(e2e_bitcoind_signer_endpoint)" >&3
   fi
 
   retry 60 1 wallet_pending_income_is_not 0 "${E2E_BRIA_WALLET}"
@@ -244,7 +240,6 @@ setup() {
 
 @test "payout: Create and cancel an unsigned batch" {
   # invalidates signer to allow cancel the batch
-  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -318,7 +313,6 @@ setup() {
 }
 
 @test "payout: Error when try to create and cancel a signed batch" {
-  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -433,7 +427,6 @@ setup() {
 }
 
 @test "payout: Can create payout batch with 120+ inputs without payload error" {
-  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
@@ -506,7 +499,6 @@ setup() {
   bitcoin_signer_cli -named sendall recipients="[\"bcrt1q208tuy5rd3kvy8xdpv6yrczg7f3mnlk3lql7ej\"]" fee_rate=1 || true
   bitcoin_cli -generate 6
 
-  e2e_ensure_default_signer_wallet_loaded
   bria_cmd set-signer-config \
     --xpub "${E2E_SIGNER_XPUB_REF}" bitcoind \
     --endpoint "$(e2e_bitcoind_signer_endpoint)" \
