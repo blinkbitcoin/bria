@@ -348,7 +348,7 @@ impl UtxoRepo {
         query_builder.push_bind(payout_queue_id);
         query_builder.push(", spending_sats_per_vbyte = ");
         query_builder.push_bind(fee_rate.as_sat_per_vb());
-        query_builder.push("WHERE account_id = ");
+        query_builder.push(" WHERE account_id = ");
         query_builder.push_bind(account_id);
         query_builder.push(" AND (spending_batch_id IS NULL OR spending_batch_id = ");
         query_builder.push_bind(batch_id);
@@ -594,7 +594,7 @@ impl UtxoRepo {
                   LATERAL UNNEST(u2.trusted_origin_tx_input_tx_ids) AS unnested(ancestor_id) ON true
               JOIN
                   unconfirmed_spends ua ON ua.ancestor_id = u2.tx_id
-              WHERE 
+              WHERE
                   u2.income_settled_ledger_tx_id IS NULL
           )
           SELECT DISTINCT
