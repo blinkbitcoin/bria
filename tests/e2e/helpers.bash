@@ -126,13 +126,16 @@ bitcoind_init() {
   local wallet="${1:-default}"
 
   bitcoin_cli createwallet "default" || true
+  bitcoin_cli loadwallet "default" || true
   bitcoin_cli generatetoaddress 200 "$(bitcoin_cli getnewaddress)"
 
   if [[ "${wallet}" == "default" ]]; then
     bitcoin_signer_cli createwallet "default" || true
+    bitcoin_signer_cli loadwallet "default" || true
     bitcoin_signer_cli -rpcwallet=default importdescriptors "$(cat ${REPO_ROOT}/tests/e2e/bitcoind_signer_descriptors.json)"
   elif [[ "${wallet}" == "multisig" ]]; then
     bitcoin_signer_cli createwallet "multisig" || true
+    bitcoin_signer_cli loadwallet "multisig" || true
     bitcoin_signer_cli -rpcwallet=multisig importdescriptors "$(cat ${REPO_ROOT}/tests/e2e/bitcoind_multisig_signer_descriptors.json)"
     bitcoin_signer_cli createwallet "multisig2" || true
     bitcoin_signer_cli -rpcwallet=multisig2 importdescriptors "$(cat ${REPO_ROOT}/tests/e2e/bitcoind_multisig2_signer_descriptors.json)"
