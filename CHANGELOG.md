@@ -1,3 +1,21 @@
+# [bria release v0.1.133](https://github.com/blinkbitcoin/bria/releases/tag/0.1.133)
+
+
+### Bug Fixes
+
+- Ensure signer wallet is loaded after stack restarts (#52)
+
+### Refactor
+
+- Extract sync_wallet execute into focused helper functions (#47)
+
+### Testing
+
+- Wallet path load check (#53)
+- Add load wallet to bitcoind init (#51)
+- Update deps for e2e-tests (#50)
+- Make suite idempotent with scoped wallets and queues (#49)
+
 # [bria release v0.1.132](https://github.com/blinkbitcoin/bria/releases/tag/0.1.132)
 
 
