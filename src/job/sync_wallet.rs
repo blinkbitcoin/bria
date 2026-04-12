@@ -79,7 +79,7 @@ struct KeychainSyncContext<'a> {
     fees_to_encumber: Satoshis,
 }
 
-const MAX_TXS_PER_SYNC: usize = 100;
+const MAX_TXS_PER_SYNC: usize = 200;
 
 #[instrument(
     name = "job.sync_wallet",

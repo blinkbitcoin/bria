@@ -10,4 +10,6 @@ pub enum UtxoError {
     UtxoAlreadySettledError,
     #[error("UtxoError - Utxo does not exist")]
     UtxoDoesNotExistError,
+    #[error("UtxoError - Failed to reserve all utxos for batch (expected {expected}, reserved {reserved})")]
+    ReserveUtxosMismatch { expected: usize, reserved: usize },
 }
