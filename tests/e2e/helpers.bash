@@ -6,7 +6,11 @@ export PG_CON="${PG_CON:-${DATABASE_URL}}"
 if [[ "${BRIA_CONFIG}" == "docker" ]]; then
   COMPOSE_FILE_ARG="-f docker-compose.yml"
 fi
-BITCOIND_SIGNER_ENDPOINT_BASE="${BITCOIND_SIGNER_ENDPOINT:-https://localhost:18543}"
+if [[ "${BITCOIND_SIGNER_ENDPOINT:-}" == *"/wallet/"* ]]; then
+  BITCOIND_SIGNER_ENDPOINT_BASE="${BITCOIND_SIGNER_ENDPOINT%%/wallet/*}"
+else
+  BITCOIND_SIGNER_ENDPOINT_BASE="${BITCOIND_SIGNER_ENDPOINT:-https://localhost:18543}"
+fi
 BITCOIND_SIGNER_ENDPOINT="${BITCOIND_SIGNER_ENDPOINT_BASE}"
 SATS_IN_ONE_BTC=100000000
 
@@ -217,7 +221,7 @@ e2e_ensure_default_signer_wallet_loaded() {
 
   if bitcoin_signer_wallet_cli "${E2E_BITCOIND_SIGNER_WALLET}" getwalletinfo >/dev/null 2>&1; then
     BITCOIND_SIGNER_ENDPOINT="$(e2e_bitcoind_signer_endpoint "${E2E_BITCOIND_SIGNER_WALLET}")"
-    echo "[e2e] signer wallet already loaded, endpoint=${BITCOIND_SIGNER_ENDPOINT}" >&3
+    echo "[e2e] signer wallet already loaded, base=${BITCOIND_SIGNER_ENDPOINT_BASE}, endpoint=${BITCOIND_SIGNER_ENDPOINT}" >&3
     return
   fi
 
@@ -288,7 +292,6 @@ e2e_save_context() {
   for var_name in $(compgen -A variable E2E_); do
     printf 'export %s=%q\n' "${var_name}" "${!var_name}" >> "${context_file}"
   done
-  printf 'export BITCOIND_SIGNER_ENDPOINT=%q\n' "${BITCOIND_SIGNER_ENDPOINT}" >> "${context_file}"
 }
 
 e2e_load_context() {
