@@ -24,7 +24,7 @@ services:
   e2e-tests:
     image: us.gcr.io/galoy-org/rust-concourse
     depends_on:
-      - postgres
+      - integration-deps
     command: ["make", "e2e-tests-in-container"]
     working_dir: /repo
     volumes:
