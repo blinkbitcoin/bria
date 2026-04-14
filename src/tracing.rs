@@ -1,5 +1,5 @@
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::{propagation::TextMapPropagator, KeyValue};
+use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::{Sampler, TracerProvider};
 use opentelemetry_sdk::{propagation::TraceContextPropagator, Resource};
@@ -18,6 +18,8 @@ pub struct TracingConfig {
     host: String,
     port: u16,
     service_name: String,
+    #[serde(default)]
+    sample_ratio: Option<f64>,
 }
 
 impl Default for TracingConfig {
@@ -26,6 +28,7 @@ impl Default for TracingConfig {
             host: "localhost".to_string(),
             port: 4317,
             service_name: "bria-dev".to_string(),
+            sample_ratio: None,
         }
     }
 }
@@ -34,21 +37,31 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
     let tracing_endpoint = format!("http://{}:{}", config.host, config.port);
     let service_name = config.service_name;
     println!("Sending traces to {tracing_endpoint}");
+    global::set_text_map_propagator(TraceContextPropagator::new());
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(tracing_endpoint)
         .build()?;
 
+    let sampler = match config.sample_ratio {
+        Some(ratio) if ratio <= 0.0 => Sampler::AlwaysOff,
+        Some(ratio) if ratio < 1.0 => {
+            Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))
+        }
+        _ => Sampler::AlwaysOn,
+    };
+
     let provider = TracerProvider::builder()
         .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_sampler(Sampler::AlwaysOn)
+        .with_sampler(sampler)
         .with_resource(Resource::new(vec![KeyValue::new(
             "service.name",
             service_name.clone(),
         )]))
         .build();
-    let tracer = provider.tracer(service_name);
+    let tracer = provider.tracer(service_name.clone());
+    global::set_tracer_provider(provider);
 
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
@@ -67,16 +80,20 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
 
 pub fn extract_tracing_data() -> HashMap<String, String> {
     let mut tracing_data = HashMap::new();
-    let propagator = TraceContextPropagator::new();
     let context = Span::current().context();
-    propagator.inject_context(&context, &mut tracing_data);
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut tracing_data);
+    });
     tracing_data
 }
 
 pub fn inject_tracing_data(span: &Span, tracing_data: &HashMap<String, String>) {
-    let propagator = TraceContextPropagator::new();
-    let context = propagator.extract(tracing_data);
+    let context = global::get_text_map_propagator(|propagator| propagator.extract(tracing_data));
     span.set_parent(context);
+}
+
+pub fn shutdown_tracer() {
+    global::shutdown_tracer_provider();
 }
 
 pub fn insert_error_fields(level: tracing::Level, error: impl std::fmt::Display) {
