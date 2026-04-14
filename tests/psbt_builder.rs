@@ -8,6 +8,10 @@ use uuid::Uuid;
 
 use bria::{primitives::*, utxo::*, wallet::*, xpub::*};
 
+fn test_progress_context() -> SyncProgressContext {
+    SyncProgressContext::new()
+}
+
 #[tokio::test]
 #[serial]
 async fn build_psbt() -> anyhow::Result<()> {
@@ -40,10 +44,12 @@ async fn build_psbt() -> anyhow::Result<()> {
     let external = "wpkh([6f2fa1b2/84'/0'/0']tpubDDDDGYiFda8HfJRc2AHFJDxVzzEtBPrKsbh35EaW2UGd5qfzrF2G87ewAgeeRyHEz4iB3kvhAYW1sH6dpLepTkFUzAktumBN8AXeXWE9nd1/0/*)#l6n08zmr";
     let internal = "wpkh([6f2fa1b2/84'/0'/0']tpubDDDDGYiFda8HfJRc2AHFJDxVzzEtBPrKsbh35EaW2UGd5qfzrF2G87ewAgeeRyHEz4iB3kvhAYW1sH6dpLepTkFUzAktumBN8AXeXWE9nd1/1/*)#wwkw6htm";
     let domain_current_keychain_id = Uuid::new_v4();
+    let domain_wallet_id = WalletId::new();
     let keychain_cfg = KeychainConfig::try_from((external, internal))?;
     let domain_current_keychain = KeychainWallet::new(
         pool.clone(),
         Network::Regtest,
+        domain_wallet_id,
         domain_current_keychain_id.into(),
         keychain_cfg,
     );
@@ -81,7 +87,9 @@ async fn build_psbt() -> anyhow::Result<()> {
     }
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain).await?;
+        domain_current_keychain
+            .sync(blockchain, test_progress_context())
+            .await?;
     }
 
     let fee = FeeRate::from_sat_per_vb(1.0);
@@ -92,7 +100,6 @@ async fn build_psbt() -> anyhow::Result<()> {
         .unwrap();
     let builder = PsbtBuilder::new(cfg);
 
-    let domain_wallet_id = WalletId::new();
     let domain_send_amount = wallet_funding_sats - Satoshis::from(155);
     let other_wallet_id = WalletId::new();
     let send_amount = Satoshis::from(100_000_000);
@@ -231,11 +238,13 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
     let pool = helpers::init_pool().await?;
 
     let domain_current_keychain_id = Uuid::new_v4();
+    let domain_wallet_id = WalletId::new();
     let xpub = XPub::try_from(("tpubDD4vFnWuTMEcZiaaZPgvzeGyMzWe6qHW8gALk5Md9kutDvtdDjYFwzauEFFRHgov8pAwup5jX88j5YFyiACsPf3pqn5hBjvuTLRAseaJ6b4", Some("m/84'/0'/0'"))).unwrap();
     let keychain_cfg = KeychainConfig::wpkh(xpub);
     let domain_current_keychain = KeychainWallet::new(
         pool.clone(),
         Network::Regtest,
+        domain_wallet_id,
         domain_current_keychain_id.into(),
         keychain_cfg,
     );
@@ -283,7 +292,6 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
         .unwrap();
     let builder = PsbtBuilder::new(cfg);
 
-    let domain_wallet_id = WalletId::new();
     let domain_send_amount = wallet_funding_sats - Satoshis::from(100_000_000);
     let destination = Address::parse_from_trusted_source("mgWUuj1J1N882jmqFxtDepEC73Rr22E9GU");
     let payouts_one = vec![(Uuid::new_v4(), destination.clone(), domain_send_amount)];
@@ -293,7 +301,9 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
         .accept_current_keychain();
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain).await?;
+        domain_current_keychain
+            .sync(blockchain, test_progress_context())
+            .await?;
     }
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)
@@ -379,11 +389,13 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
     let pool = helpers::init_pool().await?;
 
     let domain_current_keychain_id = Uuid::new_v4();
+    let domain_wallet_id = WalletId::new();
     let xpub = XPub::try_from(("tpubDD4vFnWuTMEcZiaaZPgvzeGyMzWe6qHW8gALk5Md9kutDvtdDjYFwzauEFFRHgov8pAwup5jX88j5YFyiACsPf3pqn5hBjvuTLRAseaJ6b4", Some("m/84'/0'/0'"))).unwrap();
     let keychain_cfg = KeychainConfig::wpkh(xpub);
     let domain_current_keychain = KeychainWallet::new(
         pool.clone(),
         Network::Regtest,
+        domain_wallet_id,
         domain_current_keychain_id.into(),
         keychain_cfg,
     );
@@ -407,7 +419,6 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
         .unwrap();
     let builder = PsbtBuilder::new(cfg);
 
-    let domain_wallet_id = WalletId::new();
     let domain_send_amount = wallet_funding_sats - Satoshis::from(50_000_000);
     let destination = Address::parse_from_trusted_source("mgWUuj1J1N882jmqFxtDepEC73Rr22E9GU");
     let payouts_one = vec![(Uuid::new_v4(), destination.clone(), domain_send_amount)];
@@ -417,7 +428,9 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
         .accept_current_keychain();
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain).await?;
+        domain_current_keychain
+            .sync(blockchain, test_progress_context())
+            .await?;
     }
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)

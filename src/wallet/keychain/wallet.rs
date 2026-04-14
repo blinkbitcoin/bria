@@ -1,11 +1,13 @@
 use bdk::{
-    blockchain::{GetHeight, WalletSync},
+    blockchain::{GetHeight, Progress, WalletSync},
     database::{BatchDatabase, Database},
-    wallet::{signer::SignOptions, AddressIndex},
+    wallet::{signer::SignOptions, AddressIndex, SyncOptions},
     Wallet,
 };
 use sqlx::PgPool;
+use std::{sync::Mutex, time::Duration};
 use tracing::instrument;
+use uuid::Uuid;
 
 use super::config::*;
 use crate::{
@@ -22,20 +24,139 @@ pub trait BdkWalletVisitor: Sized + Send + 'static {
 }
 
 pub struct KeychainWallet {
+    pub wallet_id: WalletId,
     pub keychain_id: KeychainId,
     pool: PgPool,
     network: Network,
     config: KeychainConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct SyncProgressContext {
+    pub sync_run_id: String,
+}
+
+impl SyncProgressContext {
+    pub fn new() -> Self {
+        Self {
+            sync_run_id: Uuid::new_v4().to_string(),
+        }
+    }
+}
+
+impl Default for SyncProgressContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const PROGRESS_BUCKET_SIZE_PCT: u8 = 10;
+const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+const fn completion_bucket() -> u8 {
+    100 / PROGRESS_BUCKET_SIZE_PCT
+}
+
+#[derive(Debug)]
+struct ProgressState {
+    last_bucket: Option<u8>,
+    last_emit_at: std::time::Instant,
+}
+
+#[derive(Debug)]
+struct TracingBdkProgress {
+    context: SyncProgressContext,
+    wallet_id: WalletId,
+    keychain_id: KeychainId,
+    state: Mutex<ProgressState>,
+}
+
+impl TracingBdkProgress {
+    fn new(context: SyncProgressContext, wallet_id: WalletId, keychain_id: KeychainId) -> Self {
+        Self {
+            context,
+            wallet_id,
+            keychain_id,
+            state: Mutex::new(ProgressState {
+                last_bucket: None,
+                last_emit_at: std::time::Instant::now(),
+            }),
+        }
+    }
+}
+
+impl Progress for TracingBdkProgress {
+    fn update(&self, progress: f32, message: Option<String>) -> Result<(), bdk::Error> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                tracing::warn!(
+                    sync_run_id = %self.context.sync_run_id,
+                    wallet_id = %self.wallet_id,
+                    keychain_id = %self.keychain_id,
+                    "bdk progress state mutex poisoned; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        let elapsed = state.last_emit_at.elapsed();
+
+        if !should_emit_progress(state.last_bucket, progress, elapsed) {
+            return Ok(());
+        }
+
+        let bucket = progress_bucket(progress);
+        state.last_bucket = Some(bucket);
+        state.last_emit_at = std::time::Instant::now();
+
+        tracing::info!(
+            sync_run_id = %self.context.sync_run_id,
+            wallet_id = %self.wallet_id,
+            keychain_id = %self.keychain_id,
+            progress_pct = progress,
+            progress_message = message.as_deref().unwrap_or(""),
+            "wallet sync progress"
+        );
+
+        Ok(())
+    }
+}
+
+fn progress_bucket(progress: f32) -> u8 {
+    (progress.clamp(0.0, 100.0) as u8 / PROGRESS_BUCKET_SIZE_PCT).min(completion_bucket())
+}
+
+fn should_emit_progress(
+    last_bucket: Option<u8>,
+    progress: f32,
+    elapsed_since_last_emit: Duration,
+) -> bool {
+    if last_bucket.is_none() {
+        return true;
+    }
+
+    let bucket = progress_bucket(progress);
+    if last_bucket != Some(bucket) {
+        return true;
+    }
+
+    if progress >= 100.0 {
+        return last_bucket != Some(completion_bucket());
+    }
+
+    elapsed_since_last_emit >= PROGRESS_HEARTBEAT_INTERVAL
+}
+
 impl KeychainWallet {
     pub fn new(
         pool: PgPool,
         network: Network,
+        wallet_id: WalletId,
         keychain_id: KeychainId,
         descriptors: KeychainConfig,
     ) -> Self {
         Self {
+            wallet_id,
             pool,
             network,
             keychain_id,
@@ -105,8 +226,13 @@ impl KeychainWallet {
     pub async fn sync<B: WalletSync + GetHeight + Send + Sync + 'static>(
         &self,
         blockchain: B,
+        context: SyncProgressContext,
     ) -> Result<(), BdkError> {
+        let sync_span = tracing::Span::current();
+        let wallet_id = self.wallet_id;
+        let keychain_id = self.keychain_id;
         self.with_wallet(move |wallet| {
+            let _span_guard = sync_span.enter();
             let last_external = wallet
                 .database()
                 .get_last_index(KeychainKind::External)?
@@ -118,7 +244,13 @@ impl KeychainWallet {
             let max_last_index = last_external.max(last_internal);
 
             let _ = wallet.ensure_addresses_cached(max_last_index.saturating_add(1))?;
-            wallet.sync(&blockchain, Default::default())
+            let progress = TracingBdkProgress::new(context, wallet_id, keychain_id);
+            wallet.sync(
+                &blockchain,
+                SyncOptions {
+                    progress: Some(Box::new(progress)),
+                },
+            )
         })
         .await??;
         Ok(())
@@ -172,5 +304,45 @@ impl KeychainWallet {
             Ok(Err(e)) => Err(e),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emits_first_progress_update() {
+        assert!(should_emit_progress(None, 1.0, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn emits_when_bucket_changes() {
+        let elapsed = Duration::from_secs(1);
+        assert!(should_emit_progress(Some(0), 11.0, elapsed));
+        assert!(!should_emit_progress(Some(1), 15.0, elapsed));
+    }
+
+    #[test]
+    fn emits_on_heartbeat_interval() {
+        assert!(should_emit_progress(
+            Some(3),
+            35.0,
+            PROGRESS_HEARTBEAT_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn emits_at_completion_even_without_bucket_change() {
+        assert!(should_emit_progress(Some(9), 100.0, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn does_not_repeat_completion_event() {
+        assert!(!should_emit_progress(
+            Some(10),
+            100.0,
+            Duration::from_secs(1)
+        ));
     }
 }

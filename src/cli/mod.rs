@@ -1124,6 +1124,7 @@ async fn run_cmd(
     for handle in handles {
         handle.abort();
     }
+    crate::tracing::shutdown_tracer();
 
     reason
 }

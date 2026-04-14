@@ -5,7 +5,7 @@ use bdk::{
 };
 use electrum_client::{Client, ConfigBuilder};
 use serde::{Deserialize, Serialize};
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 
 use super::error::JobError;
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
     ledger::*,
     primitives::*,
     utxo::{error::UtxoError, Utxos, WalletUtxo},
-    wallet::*,
+    wallet::{SyncProgressContext, *},
 };
 use std::collections::HashMap;
 
@@ -85,6 +85,7 @@ const MAX_TXS_PER_SYNC: usize = 200;
     name = "job.sync_wallet",
     skip(pool, wallets, batches, bria_utxos, bria_addresses, ledger),
     fields(
+        sync_run_id,
         n_pending_utxos,
         n_confirmed_utxos,
         n_found_txs,
@@ -105,8 +106,11 @@ pub async fn execute(
     data: SyncWalletData,
     fees_client: FeesClient,
 ) -> Result<(bool, SyncWalletData), JobError> {
-    info!("Starting sync_wallet job: {:?}", data);
+    let progress_context = SyncProgressContext::new();
+    let sync_run_id = progress_context.sync_run_id.clone();
+    info!(%sync_run_id, "Starting sync_wallet job: {:?}", data);
     let span = tracing::Span::current();
+    span.record("sync_run_id", tracing::field::display(&sync_run_id));
 
     let wallet = wallets.find_by_id(data.wallet_id).await?;
     let mut trackers = InstrumentationTrackers::new();
@@ -127,7 +131,17 @@ pub async fn execute(
         let (blockchain, current_height) = init_electrum(&deps.blockchain_cfg.electrum_url).await?;
         span.record("current_height", current_height);
 
-        keychain_wallet.sync(blockchain).await?;
+        info!(%sync_run_id, %keychain_id, "wallet sync phase started");
+        match keychain_wallet
+            .sync(blockchain, progress_context.clone())
+            .await
+        {
+            Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),
+            Err(err) => {
+                error!(%sync_run_id, %keychain_id, error = %err, "wallet sync phase failed");
+                return Err(err.into());
+            }
+        }
 
         let bdk_txs = Transactions::new(keychain_id, pool.clone());
         let bdk_utxos = BdkUtxos::new(keychain_id, pool.clone());

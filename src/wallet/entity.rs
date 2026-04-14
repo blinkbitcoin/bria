@@ -84,16 +84,16 @@ impl Wallet {
 
     pub fn current_keychain_wallet(&self, pool: &sqlx::PgPool) -> KeychainWallet {
         let (id, cfg) = self.iter_keychains().next().expect("No current keychain");
-        KeychainWallet::new(pool.clone(), self.network, *id, cfg.clone())
+        KeychainWallet::new(pool.clone(), self.network, self.id, *id, cfg.clone())
     }
 
     pub fn deprecated_keychain_wallets(
         &self,
         pool: sqlx::PgPool,
     ) -> impl Iterator<Item = KeychainWallet> + '_ {
-        self.iter_keychains()
-            .skip(1)
-            .map(move |(id, cfg)| KeychainWallet::new(pool.clone(), self.network, *id, cfg.clone()))
+        self.iter_keychains().skip(1).map(move |(id, cfg)| {
+            KeychainWallet::new(pool.clone(), self.network, self.id, *id, cfg.clone())
+        })
     }
 
     pub fn xpubs_for_keychains<'a>(
