@@ -61,6 +61,7 @@ async fn build_psbt() -> anyhow::Result<()> {
     let wallet_funding = 700_000_000;
     let wallet_funding_sats = Satoshis::from(wallet_funding);
     let tx_id = helpers::fund_addr(&bitcoind, &domain_addr, wallet_funding)?;
+    let domain_wallet_id = WalletId::new();
     helpers::fund_addr(&bitcoind, &other_current_addr, wallet_funding - 200_000_000)?;
     helpers::fund_addr(&bitcoind, &other_deprecated_addr, 200_000_000)?;
     helpers::gen_blocks(&bitcoind, 10)?;
@@ -81,7 +82,7 @@ async fn build_psbt() -> anyhow::Result<()> {
     }
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain).await?;
+        domain_current_keychain.sync(blockchain, None).await?;
     }
 
     let fee = FeeRate::from_sat_per_vb(1.0);
@@ -92,7 +93,6 @@ async fn build_psbt() -> anyhow::Result<()> {
         .unwrap();
     let builder = PsbtBuilder::new(cfg);
 
-    let domain_wallet_id = WalletId::new();
     let domain_send_amount = wallet_funding_sats - Satoshis::from(155);
     let other_wallet_id = WalletId::new();
     let send_amount = Satoshis::from(100_000_000);
@@ -293,7 +293,7 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
         .accept_current_keychain();
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain).await?;
+        domain_current_keychain.sync(blockchain, None).await?;
     }
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)
@@ -417,7 +417,7 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
         .accept_current_keychain();
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain).await?;
+        domain_current_keychain.sync(blockchain, None).await?;
     }
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)

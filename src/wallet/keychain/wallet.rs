@@ -7,6 +7,7 @@ use bdk::{
 use sqlx::PgPool;
 use std::{sync::Mutex, time::Duration};
 use tracing::instrument;
+use uuid::Uuid;
 
 use super::config::*;
 use crate::{
@@ -29,6 +30,35 @@ pub struct KeychainWallet {
     config: KeychainConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct SyncProgressContext {
+    pub wallet_id: WalletId,
+    pub keychain_id: KeychainId,
+    pub sync_run_id: String,
+}
+
+impl SyncProgressContext {
+    pub fn new(wallet_id: WalletId, keychain_id: KeychainId) -> Self {
+        Self {
+            wallet_id,
+            keychain_id,
+            sync_run_id: Uuid::new_v4().to_string(),
+        }
+    }
+
+    pub fn with_sync_run_id(
+        wallet_id: WalletId,
+        keychain_id: KeychainId,
+        sync_run_id: String,
+    ) -> Self {
+        Self {
+            wallet_id,
+            keychain_id,
+            sync_run_id,
+        }
+    }
+}
+
 const PROGRESS_BUCKET_SIZE_PCT: u8 = 10;
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -40,18 +70,14 @@ struct ProgressState {
 
 #[derive(Debug)]
 struct TracingBdkProgress {
-    wallet_id: WalletId,
-    keychain_id: KeychainId,
-    sync_run_id: String,
+    context: SyncProgressContext,
     state: Mutex<ProgressState>,
 }
 
 impl TracingBdkProgress {
-    fn new(wallet_id: WalletId, keychain_id: KeychainId, sync_run_id: String) -> Self {
+    fn new(context: SyncProgressContext) -> Self {
         Self {
-            wallet_id,
-            keychain_id,
-            sync_run_id,
+            context,
             state: Mutex::new(ProgressState {
                 last_bucket: None,
                 last_emit_at: std::time::Instant::now(),
@@ -74,9 +100,9 @@ impl Progress for TracingBdkProgress {
         state.last_emit_at = std::time::Instant::now();
 
         tracing::info!(
-            sync_run_id = %self.sync_run_id,
-            wallet_id = %self.wallet_id,
-            keychain_id = %self.keychain_id,
+            sync_run_id = %self.context.sync_run_id,
+            wallet_id = %self.context.wallet_id,
+            keychain_id = %self.context.keychain_id,
             progress_pct = progress,
             progress_message = message.as_deref().unwrap_or(""),
             "wallet sync progress"
@@ -188,20 +214,11 @@ impl KeychainWallet {
     pub async fn sync<B: WalletSync + GetHeight + Send + Sync + 'static>(
         &self,
         blockchain: B,
-    ) -> Result<(), BdkError> {
-        self.sync_with_context(blockchain, WalletId::new(), String::from("unknown"))
-            .await
-    }
-
-    #[instrument(name = "keychain_wallet.sync_with_context", skip_all)]
-    pub async fn sync_with_context<B: WalletSync + GetHeight + Send + Sync + 'static>(
-        &self,
-        blockchain: B,
-        wallet_id: WalletId,
-        sync_run_id: String,
+        context: Option<SyncProgressContext>,
     ) -> Result<(), BdkError> {
         let sync_span = tracing::Span::current();
-        let keychain_id = self.keychain_id;
+        let progress_context =
+            context.unwrap_or_else(|| SyncProgressContext::new(WalletId::new(), self.keychain_id));
         self.with_wallet(move |wallet| {
             let _span_guard = sync_span.enter();
             let last_external = wallet
@@ -215,7 +232,7 @@ impl KeychainWallet {
             let max_last_index = last_external.max(last_internal);
 
             let _ = wallet.ensure_addresses_cached(max_last_index.saturating_add(1))?;
-            let progress = TracingBdkProgress::new(wallet_id, keychain_id, sync_run_id);
+            let progress = TracingBdkProgress::new(progress_context);
             wallet.sync(
                 &blockchain,
                 SyncOptions {

@@ -24,7 +24,7 @@ use crate::{
     ledger::*,
     primitives::*,
     utxo::{error::UtxoError, Utxos, WalletUtxo},
-    wallet::*,
+    wallet::{SyncProgressContext, *},
 };
 use std::collections::HashMap;
 
@@ -134,8 +134,10 @@ pub async fn execute(
         span.record("current_height", current_height);
 
         info!(%sync_run_id, %keychain_id, "wallet sync phase started");
+        let progress_context =
+            SyncProgressContext::with_sync_run_id(data.wallet_id, keychain_id, sync_run_id.clone());
         match keychain_wallet
-            .sync_with_context(blockchain, data.wallet_id, sync_run_id.clone())
+            .sync(blockchain, Some(progress_context))
             .await
         {
             Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),
