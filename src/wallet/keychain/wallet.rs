@@ -62,6 +62,10 @@ impl SyncProgressContext {
 const PROGRESS_BUCKET_SIZE_PCT: u8 = 10;
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
+const fn completion_bucket() -> u8 {
+    100 / PROGRESS_BUCKET_SIZE_PCT
+}
+
 #[derive(Debug)]
 struct ProgressState {
     last_bucket: Option<u8>,
@@ -124,7 +128,7 @@ impl Progress for TracingBdkProgress {
 }
 
 fn progress_bucket(progress: f32) -> u8 {
-    (progress.clamp(0.0, 100.0) as u8 / PROGRESS_BUCKET_SIZE_PCT).min(10)
+    (progress.clamp(0.0, 100.0) as u8 / PROGRESS_BUCKET_SIZE_PCT).min(completion_bucket())
 }
 
 fn should_emit_progress(
@@ -142,7 +146,7 @@ fn should_emit_progress(
     }
 
     if progress >= 100.0 {
-        return true;
+        return last_bucket != Some(completion_bucket());
     }
 
     elapsed_since_last_emit >= PROGRESS_HEARTBEAT_INTERVAL
@@ -225,11 +229,9 @@ impl KeychainWallet {
     pub async fn sync<B: WalletSync + GetHeight + Send + Sync + 'static>(
         &self,
         blockchain: B,
-        context: Option<SyncProgressContext>,
+        context: SyncProgressContext,
     ) -> Result<(), BdkError> {
         let sync_span = tracing::Span::current();
-        let progress_context =
-            context.unwrap_or_else(|| SyncProgressContext::new(WalletId::new(), self.keychain_id));
         self.with_wallet(move |wallet| {
             let _span_guard = sync_span.enter();
             let last_external = wallet
@@ -243,7 +245,7 @@ impl KeychainWallet {
             let max_last_index = last_external.max(last_internal);
 
             let _ = wallet.ensure_addresses_cached(max_last_index.saturating_add(1))?;
-            let progress = TracingBdkProgress::new(progress_context);
+            let progress = TracingBdkProgress::new(context);
             wallet.sync(
                 &blockchain,
                 SyncOptions {
@@ -333,7 +335,12 @@ mod tests {
 
     #[test]
     fn emits_at_completion_even_without_bucket_change() {
-        assert!(should_emit_progress(
+        assert!(should_emit_progress(Some(9), 100.0, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn does_not_repeat_completion_event() {
+        assert!(!should_emit_progress(
             Some(10),
             100.0,
             Duration::from_secs(1)

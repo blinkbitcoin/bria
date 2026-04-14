@@ -8,6 +8,14 @@ use uuid::Uuid;
 
 use bria::{primitives::*, utxo::*, wallet::*, xpub::*};
 
+fn test_progress_context(wallet_id: WalletId, keychain_id: Uuid) -> SyncProgressContext {
+    SyncProgressContext::with_sync_run_id(
+        wallet_id,
+        keychain_id.into(),
+        String::from("psbt_builder_test"),
+    )
+}
+
 #[tokio::test]
 #[serial]
 async fn build_psbt() -> anyhow::Result<()> {
@@ -82,7 +90,12 @@ async fn build_psbt() -> anyhow::Result<()> {
     }
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain, None).await?;
+        domain_current_keychain
+            .sync(
+                blockchain,
+                test_progress_context(domain_wallet_id, domain_current_keychain_id),
+            )
+            .await?;
     }
 
     let fee = FeeRate::from_sat_per_vb(1.0);
@@ -293,7 +306,12 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
         .accept_current_keychain();
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain, None).await?;
+        domain_current_keychain
+            .sync(
+                blockchain,
+                test_progress_context(domain_wallet_id, domain_current_keychain_id),
+            )
+            .await?;
     }
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)
@@ -417,7 +435,12 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
         .accept_current_keychain();
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain.sync(blockchain, None).await?;
+        domain_current_keychain
+            .sync(
+                blockchain,
+                test_progress_context(domain_wallet_id, domain_current_keychain_id),
+            )
+            .await?;
     }
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)

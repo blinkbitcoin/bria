@@ -45,7 +45,17 @@ pub fn init_tracer(config: TracingConfig) -> anyhow::Result<()> {
         .build()?;
 
     let sampler = match config.sample_ratio {
-        Some(ratio) if ratio <= 0.0 => Sampler::AlwaysOff,
+        Some(ratio) if !ratio.is_finite() => {
+            return Err(anyhow::anyhow!(
+                "Invalid tracing.sample_ratio: {ratio}. Expected a finite value in [0.0, 1.0]"
+            ));
+        }
+        Some(ratio) if !(0.0..=1.0).contains(&ratio) => {
+            return Err(anyhow::anyhow!(
+                "Invalid tracing.sample_ratio: {ratio}. Expected value in [0.0, 1.0]"
+            ));
+        }
+        Some(0.0) => Sampler::AlwaysOff,
         Some(ratio) if ratio < 1.0 => {
             Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))
         }

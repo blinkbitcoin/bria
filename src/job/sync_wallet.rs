@@ -87,7 +87,6 @@ const MAX_TXS_PER_SYNC: usize = 200;
     skip(pool, wallets, batches, bria_utxos, bria_addresses, ledger),
     fields(
         sync_run_id,
-        keychain_id,
         n_pending_utxos,
         n_confirmed_utxos,
         n_found_txs,
@@ -128,7 +127,6 @@ pub async fn execute(
         let fees_to_encumber =
             fees::fees_to_encumber(&fees_client, keychain_wallet.max_satisfaction_weight()).await?;
         let keychain_id = keychain_wallet.keychain_id;
-        span.record("keychain_id", tracing::field::display(keychain_id));
 
         let (blockchain, current_height) = init_electrum(&deps.blockchain_cfg.electrum_url).await?;
         span.record("current_height", current_height);
@@ -136,10 +134,7 @@ pub async fn execute(
         info!(%sync_run_id, %keychain_id, "wallet sync phase started");
         let progress_context =
             SyncProgressContext::with_sync_run_id(data.wallet_id, keychain_id, sync_run_id.clone());
-        match keychain_wallet
-            .sync(blockchain, Some(progress_context))
-            .await
-        {
+        match keychain_wallet.sync(blockchain, progress_context).await {
             Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),
             Err(err) => {
                 error!(%sync_run_id, %keychain_id, error = %err, "wallet sync phase failed");
