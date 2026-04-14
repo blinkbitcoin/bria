@@ -133,7 +133,7 @@ pub async fn execute(
 
         info!(%sync_run_id, %keychain_id, "wallet sync phase started");
         let progress_context =
-            SyncProgressContext::with_sync_run_id(data.wallet_id, keychain_id, sync_run_id.clone());
+            SyncProgressContext::with_sync_run_id(data.wallet_id, sync_run_id.clone());
         match keychain_wallet.sync(blockchain, progress_context).await {
             Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),
             Err(err) => {

@@ -9,10 +9,17 @@ async fn new_address() -> anyhow::Result<()> {
     let pool = helpers::init_pool().await?;
 
     let keychain_id = KeychainId::new();
+    let wallet_id = WalletId::new();
     let external = "wpkh([492ef832/84'/0'/0']tpubDCyf42ghP6mBAETwkz8AbXo97822jdUgHNug91bbX8GXpTP6ee298yGeiM5SvgL8Z85bcFyKioyRQokNh6J4eT3Fy8mgKDAKfynovRu3WzE/0/*)#gf2aklqx";
     let internal = "wpkh([492ef832/84'/0'/0']tpubDCyf42ghP6mBAETwkz8AbXo97822jdUgHNug91bbX8GXpTP6ee298yGeiM5SvgL8Z85bcFyKioyRQokNh6J4eT3Fy8mgKDAKfynovRu3WzE/1/*)#ea0ut2s7";
     let keychain_cfg = KeychainConfig::try_from((external, internal)).unwrap();
-    let wallet = KeychainWallet::new(pool.clone(), Network::Regtest, keychain_id, keychain_cfg);
+    let wallet = KeychainWallet::new(
+        pool.clone(),
+        Network::Regtest,
+        wallet_id,
+        keychain_id,
+        keychain_cfg,
+    );
 
     let addr = wallet.new_external_address().await?;
     assert_eq!(
