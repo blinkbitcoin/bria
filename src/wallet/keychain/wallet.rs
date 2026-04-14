@@ -88,7 +88,18 @@ impl TracingBdkProgress {
 
 impl Progress for TracingBdkProgress {
     fn update(&self, progress: f32, message: Option<String>) -> Result<(), bdk::Error> {
-        let mut state = self.state.lock().expect("bdk progress mutex poisoned");
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                tracing::warn!(
+                    sync_run_id = %self.context.sync_run_id,
+                    wallet_id = %self.context.wallet_id,
+                    keychain_id = %self.context.keychain_id,
+                    "bdk progress state mutex poisoned; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
         let elapsed = state.last_emit_at.elapsed();
 
         if !should_emit_progress(state.last_bucket, progress, elapsed) {

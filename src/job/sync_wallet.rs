@@ -5,7 +5,7 @@ use bdk::{
 };
 use electrum_client::{Client, ConfigBuilder};
 use serde::{Deserialize, Serialize};
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 use uuid::Uuid;
 
 use super::error::JobError;
@@ -142,7 +142,7 @@ pub async fn execute(
         {
             Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),
             Err(err) => {
-                info!(%sync_run_id, %keychain_id, error = %err, "wallet sync phase failed");
+                error!(%sync_run_id, %keychain_id, error = %err, "wallet sync phase failed");
                 return Err(err.into());
             }
         }
