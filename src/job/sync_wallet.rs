@@ -135,7 +135,7 @@ pub async fn execute(
 
         info!(%sync_run_id, %keychain_id, "wallet sync phase started");
         match keychain_wallet
-            .sync(blockchain, data.wallet_id, sync_run_id.clone())
+            .sync_with_context(blockchain, data.wallet_id, sync_run_id.clone())
             .await
         {
             Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),

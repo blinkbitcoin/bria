@@ -188,6 +188,15 @@ impl KeychainWallet {
     pub async fn sync<B: WalletSync + GetHeight + Send + Sync + 'static>(
         &self,
         blockchain: B,
+    ) -> Result<(), BdkError> {
+        self.sync_with_context(blockchain, WalletId::new(), String::from("unknown"))
+            .await
+    }
+
+    #[instrument(name = "keychain_wallet.sync_with_context", skip_all)]
+    pub async fn sync_with_context<B: WalletSync + GetHeight + Send + Sync + 'static>(
+        &self,
+        blockchain: B,
         wallet_id: WalletId,
         sync_run_id: String,
     ) -> Result<(), BdkError> {
