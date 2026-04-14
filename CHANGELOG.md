@@ -1,3 +1,10 @@
+# [bria release v0.1.134](https://github.com/blinkbitcoin/bria/releases/tag/0.1.134)
+
+
+### Features
+
+- Add wallet sync progress tracing with sync run correlation (#54)
+
 # [bria release v0.1.133](https://github.com/blinkbitcoin/bria/releases/tag/0.1.133)
 
 
