@@ -33,23 +33,20 @@ pub struct KeychainWallet {
 
 #[derive(Debug, Clone)]
 pub struct SyncProgressContext {
-    pub wallet_id: WalletId,
     pub sync_run_id: String,
 }
 
 impl SyncProgressContext {
-    pub fn new(wallet_id: WalletId) -> Self {
+    pub fn new() -> Self {
         Self {
-            wallet_id,
             sync_run_id: Uuid::new_v4().to_string(),
         }
     }
+}
 
-    pub fn with_sync_run_id(wallet_id: WalletId, sync_run_id: String) -> Self {
-        Self {
-            wallet_id,
-            sync_run_id,
-        }
+impl Default for SyncProgressContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -69,14 +66,16 @@ struct ProgressState {
 #[derive(Debug)]
 struct TracingBdkProgress {
     context: SyncProgressContext,
+    wallet_id: WalletId,
     keychain_id: KeychainId,
     state: Mutex<ProgressState>,
 }
 
 impl TracingBdkProgress {
-    fn new(context: SyncProgressContext, keychain_id: KeychainId) -> Self {
+    fn new(context: SyncProgressContext, wallet_id: WalletId, keychain_id: KeychainId) -> Self {
         Self {
             context,
+            wallet_id,
             keychain_id,
             state: Mutex::new(ProgressState {
                 last_bucket: None,
@@ -93,7 +92,7 @@ impl Progress for TracingBdkProgress {
             Err(poisoned) => {
                 tracing::warn!(
                     sync_run_id = %self.context.sync_run_id,
-                    wallet_id = %self.context.wallet_id,
+                    wallet_id = %self.wallet_id,
                     keychain_id = %self.keychain_id,
                     "bdk progress state mutex poisoned; recovering"
                 );
@@ -112,7 +111,7 @@ impl Progress for TracingBdkProgress {
 
         tracing::info!(
             sync_run_id = %self.context.sync_run_id,
-            wallet_id = %self.context.wallet_id,
+            wallet_id = %self.wallet_id,
             keychain_id = %self.keychain_id,
             progress_pct = progress,
             progress_message = message.as_deref().unwrap_or(""),
@@ -230,6 +229,7 @@ impl KeychainWallet {
         context: SyncProgressContext,
     ) -> Result<(), BdkError> {
         let sync_span = tracing::Span::current();
+        let wallet_id = self.wallet_id;
         let keychain_id = self.keychain_id;
         self.with_wallet(move |wallet| {
             let _span_guard = sync_span.enter();
@@ -244,7 +244,7 @@ impl KeychainWallet {
             let max_last_index = last_external.max(last_internal);
 
             let _ = wallet.ensure_addresses_cached(max_last_index.saturating_add(1))?;
-            let progress = TracingBdkProgress::new(context, keychain_id);
+            let progress = TracingBdkProgress::new(context, wallet_id, keychain_id);
             wallet.sync(
                 &blockchain,
                 SyncOptions {

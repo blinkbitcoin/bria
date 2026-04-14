@@ -6,7 +6,6 @@ use bdk::{
 use electrum_client::{Client, ConfigBuilder};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, instrument};
-use uuid::Uuid;
 
 use super::error::JobError;
 use crate::{
@@ -107,7 +106,8 @@ pub async fn execute(
     data: SyncWalletData,
     fees_client: FeesClient,
 ) -> Result<(bool, SyncWalletData), JobError> {
-    let sync_run_id = Uuid::new_v4().to_string();
+    let progress_context = SyncProgressContext::new();
+    let sync_run_id = progress_context.sync_run_id.clone();
     info!(%sync_run_id, "Starting sync_wallet job: {:?}", data);
     let span = tracing::Span::current();
     span.record("sync_run_id", tracing::field::display(&sync_run_id));
@@ -132,9 +132,10 @@ pub async fn execute(
         span.record("current_height", current_height);
 
         info!(%sync_run_id, %keychain_id, "wallet sync phase started");
-        let progress_context =
-            SyncProgressContext::with_sync_run_id(data.wallet_id, sync_run_id.clone());
-        match keychain_wallet.sync(blockchain, progress_context).await {
+        match keychain_wallet
+            .sync(blockchain, progress_context.clone())
+            .await
+        {
             Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),
             Err(err) => {
                 error!(%sync_run_id, %keychain_id, error = %err, "wallet sync phase failed");

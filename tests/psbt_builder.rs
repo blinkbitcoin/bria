@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use bria::{primitives::*, utxo::*, wallet::*, xpub::*};
 
-fn test_progress_context(wallet_id: WalletId) -> SyncProgressContext {
-    SyncProgressContext::with_sync_run_id(wallet_id, String::from("psbt_builder_test"))
+fn test_progress_context() -> SyncProgressContext {
+    SyncProgressContext::new()
 }
 
 #[tokio::test]
@@ -88,7 +88,7 @@ async fn build_psbt() -> anyhow::Result<()> {
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
         domain_current_keychain
-            .sync(blockchain, test_progress_context(domain_wallet_id))
+            .sync(blockchain, test_progress_context())
             .await?;
     }
 
@@ -302,7 +302,7 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
         domain_current_keychain
-            .sync(blockchain, test_progress_context(domain_wallet_id))
+            .sync(blockchain, test_progress_context())
             .await?;
     }
     let builder = domain_current_keychain
@@ -429,7 +429,7 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
         domain_current_keychain
-            .sync(blockchain, test_progress_context(domain_wallet_id))
+            .sync(blockchain, test_progress_context())
             .await?;
     }
     let builder = domain_current_keychain
