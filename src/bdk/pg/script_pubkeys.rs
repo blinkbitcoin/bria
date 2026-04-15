@@ -120,28 +120,29 @@ impl ScriptPubkeys {
         &self,
         keychain: Option<impl Into<BdkKeychainKind>>,
     ) -> Result<Vec<ScriptBuf>, bdk::Error> {
-        let kind = keychain.map(|k| k.into());
-        let rows = sqlx::query!(
-            r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind" FROM bdk_script_pubkeys
-            WHERE keychain_id = $1"#,
-            Uuid::from(self.keychain_id),
-        )
-        .fetch_all(&self.pool)
-        .await
+        let rows = match keychain.map(|k| k.into()) {
+            Some(kind) => {
+                sqlx::query_scalar!(
+                    r#"SELECT script FROM bdk_script_pubkeys
+                    WHERE keychain_id = $1 AND keychain_kind = $2"#,
+                    Uuid::from(self.keychain_id),
+                    kind as BdkKeychainKind,
+                )
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_scalar!(
+                    r#"SELECT script FROM bdk_script_pubkeys
+                    WHERE keychain_id = $1"#,
+                    Uuid::from(self.keychain_id),
+                )
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                if let Some(kind) = kind {
-                    if kind == row.keychain_kind {
-                        Some(ScriptBuf::from(row.script))
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(ScriptBuf::from(row.script))
-                }
-            })
-            .collect())
+
+        Ok(rows.into_iter().map(ScriptBuf::from).collect())
     }
 }

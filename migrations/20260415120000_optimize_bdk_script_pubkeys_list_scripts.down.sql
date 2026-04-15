@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS bdk_script_pubkeys_keychain_kind_script_idx;
