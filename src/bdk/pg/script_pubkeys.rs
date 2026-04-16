@@ -71,6 +71,7 @@ impl ScriptPubkeys {
             .map(|row| ScriptBuf::from(row.script)))
     }
 
+    #[allow(dead_code)]
     #[instrument(name = "bdk.script_pubkeys.load_all", skip_all)]
     pub async fn load_all(
         &self,

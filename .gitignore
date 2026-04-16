@@ -1,5 +1,6 @@
 /target
 .bria
+.bats-e2e
 .e2e-logs
 -
 .direnv
