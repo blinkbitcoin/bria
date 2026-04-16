@@ -142,11 +142,11 @@ impl WalletCache {
     }
 
     fn raw_txs_fully_loaded(&self) -> bool {
-        self.raw_txs_fully_loaded.load(Ordering::Relaxed)
+        self.raw_txs_fully_loaded.load(Ordering::Acquire)
     }
 
     fn set_raw_txs_fully_loaded(&self) {
-        self.raw_txs_fully_loaded.store(true, Ordering::Relaxed);
+        self.raw_txs_fully_loaded.store(true, Ordering::Release);
     }
 
     fn remove_tx(&self, txid: &Txid) -> Result<(), bdk::Error> {
@@ -257,6 +257,24 @@ impl SqlxWalletDb {
 
     fn lookup_tx(&self, txid: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
         self.lookup_tx_with_mode(txid, TxLookupMode::Any)
+    }
+
+    fn overlay_batch_txs(
+        mut txs: HashMap<Txid, TransactionDetails>,
+        batch_txs: &HashMap<Txid, TransactionDetails>,
+        include_raw: bool,
+    ) -> HashMap<Txid, TransactionDetails> {
+        if include_raw {
+            txs.extend(batch_txs.iter().map(|(id, tx)| (*id, tx.clone())));
+        } else {
+            txs.extend(batch_txs.iter().map(|(id, tx)| {
+                let mut tx = tx.clone();
+                tx.transaction = None;
+                (*id, tx)
+            }));
+        }
+
+        txs
     }
 }
 
@@ -398,7 +416,7 @@ impl Database for SqlxWalletDb {
     }
 
     fn iter_txs(&self, include_raw: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
-        let mut txs = if include_raw {
+        let txs = if include_raw {
             if self.cache.raw_txs_fully_loaded() {
                 self.cache
                     .all_txs()?
@@ -421,19 +439,9 @@ impl Database for SqlxWalletDb {
                 .block_on(async { self.transactions_repo().load_all_summaries().await })?
         };
 
-        if include_raw {
-            txs.extend(self.batch.txs.iter().map(|(id, tx)| (*id, tx.clone())));
-        } else {
-            // `load_all_summaries` already strips raw transactions from persisted rows, but
-            // batch entries can still carry `transaction: Some(_)`; normalize them here.
-            txs.extend(self.batch.txs.iter().map(|(id, tx)| {
-                let mut tx = tx.clone();
-                tx.transaction = None;
-                (*id, tx)
-            }));
-        }
-
-        Ok(txs.into_values().collect())
+        Ok(Self::overlay_batch_txs(txs, &self.batch.txs, include_raw)
+            .into_values()
+            .collect())
     }
 
     fn get_script_pubkey_from_path(
@@ -614,5 +622,45 @@ mod tests {
 
         cache.set_raw_txs_fully_loaded();
         assert!(cache.raw_txs_fully_loaded());
+    }
+
+    #[test]
+    fn overlay_batch_txs_strips_raw_when_include_raw_is_false() {
+        let txid = Txid::all_zeros();
+        let mut base = HashMap::new();
+        base.insert(txid, tx_details(txid));
+
+        let raw_tx = bdk::bitcoin::Transaction {
+            version: 2,
+            lock_time: bdk::bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+
+        let mut batch = HashMap::new();
+        let mut batch_tx = tx_details(txid);
+        batch_tx.transaction = Some(raw_tx);
+        batch.insert(txid, batch_tx);
+
+        let merged = SqlxWalletDb::overlay_batch_txs(base, &batch, false);
+        assert!(merged
+            .get(&txid)
+            .expect("merged tx should exist")
+            .transaction
+            .is_none());
+    }
+
+    #[test]
+    fn wallet_cache_all_txs_returns_cached_values() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .insert_tx(txid, tx_details(txid))
+            .expect("insert should succeed");
+
+        let txs = cache.all_txs().expect("all_txs should succeed");
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].txid, txid);
     }
 }
