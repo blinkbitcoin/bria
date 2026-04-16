@@ -126,38 +126,28 @@ impl ScriptPubkeys {
         &self,
         keychain: Option<impl Into<BdkKeychainKind>>,
     ) -> Result<Vec<ScriptBuf>, bdk::Error> {
-        let scripts = match keychain.map(|k| k.into()) {
-            Some(kind) => {
-                let rows = sqlx::query!(
-                    r#"SELECT script FROM bdk_script_pubkeys
+        let keychain_id = Uuid::from(self.keychain_id);
+        let scripts = if let Some(kind) = keychain.map(Into::into) {
+            sqlx::query_scalar!(
+                r#"SELECT script FROM bdk_script_pubkeys
                 WHERE keychain_id = $1 AND keychain_kind = $2"#,
-                    Uuid::from(self.keychain_id),
-                    kind as BdkKeychainKind,
-                )
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-
-                rows.into_iter()
-                    .map(|row| ScriptBuf::from(row.script))
-                    .collect()
-            }
-            None => {
-                let rows = sqlx::query!(
-                    r#"SELECT script FROM bdk_script_pubkeys
+                keychain_id,
+                kind as BdkKeychainKind,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| bdk::Error::Generic(e.to_string()))?
+        } else {
+            sqlx::query_scalar!(
+                r#"SELECT script FROM bdk_script_pubkeys
                 WHERE keychain_id = $1"#,
-                    Uuid::from(self.keychain_id),
-                )
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-
-                rows.into_iter()
-                    .map(|row| ScriptBuf::from(row.script))
-                    .collect()
-            }
+                keychain_id,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| bdk::Error::Generic(e.to_string()))?
         };
 
-        Ok(scripts)
+        Ok(scripts.into_iter().map(ScriptBuf::from).collect())
     }
 }

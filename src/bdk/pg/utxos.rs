@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 use crate::{bdk::error::BdkError, primitives::*};
 
+type SerializedUtxoRow = (String, i32, serde_json::Value, bool);
+
 pub struct ConfirmedIncomeUtxo {
     pub outpoint: bitcoin::OutPoint,
     pub spent: bool,
@@ -17,6 +19,22 @@ pub struct Utxos {
 }
 
 impl Utxos {
+    fn serialize_batch(batch: &[LocalUtxo]) -> Result<Vec<SerializedUtxoRow>, bdk::Error> {
+        batch
+            .iter()
+            .map(|utxo| {
+                Ok::<_, bdk::Error>((
+                    utxo.outpoint.txid.to_string(),
+                    utxo.outpoint.vout as i32,
+                    serde_json::to_value(utxo).map_err(|e| {
+                        bdk::Error::Generic(format!("failed to serialize utxo: {e}"))
+                    })?,
+                    utxo.is_spent,
+                ))
+            })
+            .collect()
+    }
+
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
         Self { keychain_id, pool }
     }
@@ -29,19 +47,7 @@ impl Utxos {
         let batches = utxos.chunks(BATCH_SIZE);
 
         for batch in batches {
-            let serialized_batch = batch
-                .iter()
-                .map(|utxo| {
-                    Ok::<_, bdk::Error>((
-                        utxo.outpoint.txid.to_string(),
-                        utxo.outpoint.vout as i32,
-                        serde_json::to_value(utxo).map_err(|e| {
-                            bdk::Error::Generic(format!("failed to serialize utxo: {e}"))
-                        })?,
-                        utxo.is_spent,
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let serialized_batch = Self::serialize_batch(batch)?;
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"INSERT INTO bdk_utxos
@@ -89,19 +95,7 @@ impl Utxos {
         let batches = utxos.chunks(BATCH_SIZE);
 
         for batch in batches {
-            let serialized_batch = batch
-                .iter()
-                .map(|utxo| {
-                    Ok::<_, bdk::Error>((
-                        utxo.outpoint.txid.to_string(),
-                        utxo.outpoint.vout as i32,
-                        serde_json::to_value(utxo).map_err(|e| {
-                            bdk::Error::Generic(format!("failed to serialize utxo: {e}"))
-                        })?,
-                        utxo.is_spent,
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let serialized_batch = Self::serialize_batch(batch)?;
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"INSERT INTO bdk_utxos
