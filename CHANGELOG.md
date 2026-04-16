@@ -1,3 +1,14 @@
+# [bria release v0.1.135](https://github.com/blinkbitcoin/bria/releases/tag/0.1.135)
+
+
+### Miscellaneous Tasks
+
+- Use stable rust toolchain and fix rust 1.95 clippy lints (#57)
+
+### Refactor
+
+- Stabilize sqlx wallet db cache semantics (#56)
+
 # [bria release v0.1.134](https://github.com/blinkbitcoin/bria/releases/tag/0.1.134)
 
 
