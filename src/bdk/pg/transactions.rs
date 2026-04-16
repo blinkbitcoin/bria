@@ -254,6 +254,15 @@ impl Transactions {
             Ok(value as u64)
         }
 
+        fn to_u32(value: i32, field: &str) -> Result<u32, bdk::Error> {
+            if value < 0 {
+                return Err(bdk::Error::Generic(format!(
+                    "negative {field} value in bdk_transactions"
+                )));
+            }
+            Ok(value as u32)
+        }
+
         rows.into_iter()
             .map(|row| {
                 let txid = row
@@ -263,7 +272,7 @@ impl Transactions {
 
                 let confirmation_time = match (row.height, row.confirmation_timestamp) {
                     (Some(height), Some(timestamp)) => Some(BlockTime {
-                        height: height as u32,
+                        height: to_u32(height, "height")?,
                         timestamp: to_u64(timestamp, "confirmation timestamp")?,
                     }),
                     _ => None,
