@@ -6,6 +6,8 @@ use std::collections::HashMap;
 
 use crate::{bdk::error::BdkError, primitives::*};
 
+type SerializedTransactionRow = (String, serde_json::Value, i64, Option<i32>);
+
 #[derive(Debug)]
 pub struct UnsyncedTransaction {
     pub tx_id: bitcoin::Txid,
@@ -31,6 +33,24 @@ pub struct Transactions {
 }
 
 impl Transactions {
+    fn serialize_batch(
+        batch: &[TransactionDetails],
+    ) -> Result<Vec<SerializedTransactionRow>, bdk::Error> {
+        batch
+            .iter()
+            .map(|tx| {
+                Ok::<_, bdk::Error>((
+                    tx.txid.to_string(),
+                    serde_json::to_value(tx).map_err(|e| {
+                        bdk::Error::Generic(format!("failed to serialize tx details: {e}"))
+                    })?,
+                    tx.sent as i64,
+                    tx.confirmation_time.as_ref().map(|t| t.height as i32),
+                ))
+            })
+            .collect()
+    }
+
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
         Self { keychain_id, pool }
     }
@@ -43,19 +63,7 @@ impl Transactions {
         let batches = txs.chunks(BATCH_SIZE);
 
         for batch in batches {
-            let serialized_batch = batch
-                .iter()
-                .map(|tx| {
-                    Ok::<_, bdk::Error>((
-                        tx.txid.to_string(),
-                        serde_json::to_value(tx).map_err(|e| {
-                            bdk::Error::Generic(format!("failed to serialize tx details: {e}"))
-                        })?,
-                        tx.sent as i64,
-                        tx.confirmation_time.as_ref().map(|t| t.height as i32),
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let serialized_batch = Self::serialize_batch(batch)?;
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"
@@ -106,19 +114,7 @@ impl Transactions {
         let batches = txs.chunks(BATCH_SIZE);
 
         for batch in batches {
-            let serialized_batch = batch
-                .iter()
-                .map(|tx| {
-                    Ok::<_, bdk::Error>((
-                        tx.txid.to_string(),
-                        serde_json::to_value(tx).map_err(|e| {
-                            bdk::Error::Generic(format!("failed to serialize tx details: {e}"))
-                        })?,
-                        tx.sent as i64,
-                        tx.confirmation_time.as_ref().map(|t| t.height as i32),
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let serialized_batch = Self::serialize_batch(batch)?;
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"

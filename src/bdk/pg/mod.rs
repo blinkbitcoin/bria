@@ -163,6 +163,10 @@ pub struct SqlxWalletDb {
 }
 
 impl SqlxWalletDb {
+    fn unsupported_operation(operation: &str) -> bdk::Error {
+        bdk::Error::Generic(format!("{operation} is not supported by SqlxWalletDb"))
+    }
+
     pub fn new(pool: PgPool, keychain_id: KeychainId) -> Self {
         Self {
             ctx: WalletDbContext::new(pool, keychain_id),
@@ -231,11 +235,17 @@ impl SqlxWalletDb {
             if mode == TxLookupMode::Any || tx.transaction.is_some() {
                 return Ok(Some(tx.clone()));
             }
+
+            return Ok(None);
         }
 
         if let Some(tx) = self.cache.get_tx(txid)? {
             if mode == TxLookupMode::Any || tx.transaction.is_some() {
                 return Ok(Some(tx));
+            }
+
+            if self.cache.raw_txs_fully_loaded() {
+                return Ok(None);
             }
         }
 
@@ -295,9 +305,7 @@ impl BatchOperations for SqlxWalletDb {
     }
 
     fn set_raw_tx(&mut self, _: &Transaction) -> Result<(), bdk::Error> {
-        Err(bdk::Error::Generic(
-            "set_raw_tx is not supported by SqlxWalletDb".to_string(),
-        ))
+        Err(Self::unsupported_operation("set_raw_tx"))
     }
 
     fn set_tx(&mut self, tx: &TransactionDetails) -> Result<(), bdk::Error> {
@@ -326,17 +334,13 @@ impl BatchOperations for SqlxWalletDb {
         _: KeychainKind,
         _: u32,
     ) -> Result<Option<ScriptBuf>, bdk::Error> {
-        Err(bdk::Error::Generic(
-            "del_script_pubkey_from_path is not supported by SqlxWalletDb".to_string(),
-        ))
+        Err(Self::unsupported_operation("del_script_pubkey_from_path"))
     }
     fn del_path_from_script_pubkey(
         &mut self,
         _: &Script,
     ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
-        Err(bdk::Error::Generic(
-            "del_path_from_script_pubkey is not supported by SqlxWalletDb".to_string(),
-        ))
+        Err(Self::unsupported_operation("del_path_from_script_pubkey"))
     }
     fn del_utxo(&mut self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
         self.ctx
@@ -344,9 +348,7 @@ impl BatchOperations for SqlxWalletDb {
             .block_on(async { self.utxos_repo().delete(outpoint).await })
     }
     fn del_raw_tx(&mut self, _: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        Err(bdk::Error::Generic(
-            "del_raw_tx is not supported by SqlxWalletDb".to_string(),
-        ))
+        Err(Self::unsupported_operation("del_raw_tx"))
     }
 
     fn del_tx(
@@ -367,14 +369,10 @@ impl BatchOperations for SqlxWalletDb {
         Ok(deleted)
     }
     fn del_last_index(&mut self, _: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
-        Err(bdk::Error::Generic(
-            "del_last_index is not supported by SqlxWalletDb".to_string(),
-        ))
+        Err(Self::unsupported_operation("del_last_index"))
     }
     fn del_sync_time(&mut self) -> Result<Option<SyncTime>, bdk::Error> {
-        Err(bdk::Error::Generic(
-            "del_sync_time is not supported by SqlxWalletDb".to_string(),
-        ))
+        Err(Self::unsupported_operation("del_sync_time"))
     }
 }
 
@@ -410,9 +408,7 @@ impl Database for SqlxWalletDb {
             .block_on(async { self.utxos_repo().list_local_utxos().await })
     }
     fn iter_raw_txs(&self) -> Result<Vec<Transaction>, bdk::Error> {
-        Err(bdk::Error::Generic(
-            "iter_raw_txs is not supported by SqlxWalletDb".to_string(),
-        ))
+        Err(Self::unsupported_operation("iter_raw_txs"))
     }
 
     fn iter_txs(&self, include_raw: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
