@@ -55,20 +55,18 @@ impl ScriptPubkeys {
         path: u32,
     ) -> Result<Option<ScriptBuf>, bdk::Error> {
         let kind = keychain.into();
-        let rows = sqlx::query!(
+        let row = sqlx::query!(
             r#"SELECT script FROM bdk_script_pubkeys
             WHERE keychain_id = $1 AND keychain_kind = $2 AND path = $3"#,
             Uuid::from(self.keychain_id),
             kind as BdkKeychainKind,
             path as i32,
         )
-        .fetch_all(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .next()
-            .map(|row| ScriptBuf::from(row.script)))
+
+        Ok(row.map(|row| ScriptBuf::from(row.script)))
     }
 
     #[allow(dead_code)]
@@ -100,20 +98,17 @@ impl ScriptPubkeys {
         &self,
         script: &ScriptBuf,
     ) -> Result<Option<(BdkKeychainKind, u32)>, bdk::Error> {
-        let rows = sqlx::query!(
+        let row = sqlx::query!(
             r#"SELECT keychain_kind as "keychain_kind: BdkKeychainKind", path FROM bdk_script_pubkeys
             WHERE keychain_id = $1 AND script_hex = ENCODE($2, 'hex')"#,
             Uuid::from(self.keychain_id),
             script.as_bytes(),
         )
-        .fetch_all(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        if let Some(row) = rows.into_iter().next() {
-            Ok(Some((row.keychain_kind, row.path as u32)))
-        } else {
-            Ok(None)
-        }
+
+        Ok(row.map(|row| (row.keychain_kind, row.path as u32)))
     }
 
     #[instrument(name = "bdk.script_pubkeys.list_scripts", skip_all)]
@@ -121,36 +116,38 @@ impl ScriptPubkeys {
         &self,
         keychain: Option<impl Into<BdkKeychainKind>>,
     ) -> Result<Vec<ScriptBuf>, bdk::Error> {
-        let kind = keychain.map(|k| k.into());
-        if let Some(kind) = kind {
-            let rows = sqlx::query!(
-                r#"SELECT script FROM bdk_script_pubkeys
+        let scripts = match keychain.map(|k| k.into()) {
+            Some(kind) => {
+                let rows = sqlx::query!(
+                    r#"SELECT script FROM bdk_script_pubkeys
                 WHERE keychain_id = $1 AND keychain_kind = $2"#,
-                Uuid::from(self.keychain_id),
-                kind as BdkKeychainKind,
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+                    Uuid::from(self.keychain_id),
+                    kind as BdkKeychainKind,
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-            Ok(rows
-                .into_iter()
-                .map(|row| ScriptBuf::from(row.script))
-                .collect())
-        } else {
-            let rows = sqlx::query!(
-                r#"SELECT script FROM bdk_script_pubkeys
+                rows.into_iter()
+                    .map(|row| ScriptBuf::from(row.script))
+                    .collect()
+            }
+            None => {
+                let rows = sqlx::query!(
+                    r#"SELECT script FROM bdk_script_pubkeys
                 WHERE keychain_id = $1"#,
-                Uuid::from(self.keychain_id),
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+                    Uuid::from(self.keychain_id),
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-            Ok(rows
-                .into_iter()
-                .map(|row| ScriptBuf::from(row.script))
-                .collect())
-        }
+                rows.into_iter()
+                    .map(|row| ScriptBuf::from(row.script))
+                    .collect()
+            }
+        };
+
+        Ok(scripts)
     }
 }

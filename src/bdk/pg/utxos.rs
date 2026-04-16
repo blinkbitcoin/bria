@@ -46,13 +46,16 @@ impl Utxos {
             (keychain_id, tx_id, vout, utxo_json, is_spent)"#,
             );
 
-            query_builder.push_values(serialized_batch, |mut builder, utxo| {
-                builder.push_bind(Uuid::from(self.keychain_id));
-                builder.push_bind(utxo.0);
-                builder.push_bind(utxo.1);
-                builder.push_bind(utxo.2);
-                builder.push_bind(utxo.3);
-            });
+            query_builder.push_values(
+                serialized_batch,
+                |mut builder, (tx_id, vout, utxo_json, is_spent)| {
+                    builder.push_bind(Uuid::from(self.keychain_id));
+                    builder.push_bind(tx_id);
+                    builder.push_bind(vout);
+                    builder.push_bind(utxo_json);
+                    builder.push_bind(is_spent);
+                },
+            );
 
             query_builder.push(
                 "ON CONFLICT (keychain_id, tx_id, vout) DO UPDATE \

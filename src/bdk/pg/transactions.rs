@@ -61,13 +61,16 @@ impl Transactions {
             (keychain_id, tx_id, details_json, sent, height)"#,
             );
 
-            query_builder.push_values(serialized_batch, |mut builder, tx| {
-                builder.push_bind(self.keychain_id as KeychainId);
-                builder.push_bind(tx.0);
-                builder.push_bind(tx.1);
-                builder.push_bind(tx.2);
-                builder.push_bind(tx.3);
-            });
+            query_builder.push_values(
+                serialized_batch,
+                |mut builder, (tx_id, details_json, sent, height)| {
+                    builder.push_bind(self.keychain_id as KeychainId);
+                    builder.push_bind(tx_id);
+                    builder.push_bind(details_json);
+                    builder.push_bind(sent);
+                    builder.push_bind(height);
+                },
+            );
 
             query_builder.push(
                 "ON CONFLICT (keychain_id, tx_id) DO UPDATE \
