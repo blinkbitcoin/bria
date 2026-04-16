@@ -1,11 +1,9 @@
 use bdk::{bitcoin::blockdata::transaction::OutPoint, LocalUtxo, TransactionDetails};
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction as SqlxTransaction};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use tracing::instrument;
 use uuid::Uuid;
 
 use crate::{bdk::error::BdkError, primitives::*};
-
-type SerializedUtxoRow = (String, i32, serde_json::Value, bool);
 
 pub struct ConfirmedIncomeUtxo {
     pub outpoint: bitcoin::OutPoint,
@@ -19,51 +17,42 @@ pub struct Utxos {
 }
 
 impl Utxos {
-    fn serialize_batch(batch: &[LocalUtxo]) -> Result<Vec<SerializedUtxoRow>, bdk::Error> {
-        batch
-            .iter()
-            .map(|utxo| {
-                Ok::<_, bdk::Error>((
-                    utxo.outpoint.txid.to_string(),
-                    utxo.outpoint.vout as i32,
-                    serde_json::to_value(utxo).map_err(|e| {
-                        bdk::Error::Generic(format!("failed to serialize utxo: {e}"))
-                    })?,
-                    utxo.is_spent,
-                ))
-            })
-            .collect()
-    }
-
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
         Self { keychain_id, pool }
     }
 
     #[instrument(name = "bdk.utxos.persist_all", skip_all)]
-    // Retained for non-transactional call sites and focused tests.
-    #[allow(dead_code)]
     pub async fn persist_all(&self, utxos: Vec<LocalUtxo>) -> Result<(), bdk::Error> {
         const BATCH_SIZE: usize = 2000;
         let batches = utxos.chunks(BATCH_SIZE);
 
         for batch in batches {
-            let serialized_batch = Self::serialize_batch(batch)?;
+            let serialized_batch = batch
+                .iter()
+                .map(|utxo| {
+                    Ok::<_, bdk::Error>((
+                        utxo.outpoint.txid.to_string(),
+                        utxo.outpoint.vout as i32,
+                        serde_json::to_value(utxo).map_err(|e| {
+                            bdk::Error::Generic(format!("failed to serialize utxo: {e}"))
+                        })?,
+                        utxo.is_spent,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"INSERT INTO bdk_utxos
             (keychain_id, tx_id, vout, utxo_json, is_spent)"#,
             );
 
-            query_builder.push_values(
-                serialized_batch,
-                |mut builder, (tx_id, vout, utxo_json, is_spent)| {
-                    builder.push_bind(Uuid::from(self.keychain_id));
-                    builder.push_bind(tx_id);
-                    builder.push_bind(vout);
-                    builder.push_bind(utxo_json);
-                    builder.push_bind(is_spent);
-                },
-            );
+            query_builder.push_values(serialized_batch, |mut builder, utxo| {
+                builder.push_bind(Uuid::from(self.keychain_id));
+                builder.push_bind(utxo.0);
+                builder.push_bind(utxo.1);
+                builder.push_bind(utxo.2);
+                builder.push_bind(utxo.3);
+            });
 
             query_builder.push(
                 "ON CONFLICT (keychain_id, tx_id, vout) DO UPDATE \
@@ -76,57 +65,9 @@ impl Utxos {
                     OR bdk_utxos.deleted_at IS NOT NULL",
             );
 
-            query_builder
-                .build()
+            let query = query_builder.build();
+            query
                 .execute(&self.pool)
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        }
-
-        Ok(())
-    }
-
-    pub async fn persist_all_in_tx(
-        &self,
-        tx: &mut SqlxTransaction<'_, Postgres>,
-        utxos: Vec<LocalUtxo>,
-    ) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 2000;
-        let batches = utxos.chunks(BATCH_SIZE);
-
-        for batch in batches {
-            let serialized_batch = Self::serialize_batch(batch)?;
-
-            let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
-                r#"INSERT INTO bdk_utxos
-            (keychain_id, tx_id, vout, utxo_json, is_spent)"#,
-            );
-
-            query_builder.push_values(
-                serialized_batch,
-                |mut builder, (tx_id, vout, utxo_json, is_spent)| {
-                    builder.push_bind(Uuid::from(self.keychain_id));
-                    builder.push_bind(tx_id);
-                    builder.push_bind(vout);
-                    builder.push_bind(utxo_json);
-                    builder.push_bind(is_spent);
-                },
-            );
-
-            query_builder.push(
-                "ON CONFLICT (keychain_id, tx_id, vout) DO UPDATE \
-                 SET utxo_json = EXCLUDED.utxo_json,\
-                     is_spent = EXCLUDED.is_spent,\
-                     modified_at = NOW(),\
-                     deleted_at = NULL \
-                 WHERE bdk_utxos.utxo_json IS DISTINCT FROM EXCLUDED.utxo_json \
-                    OR bdk_utxos.is_spent IS DISTINCT FROM EXCLUDED.is_spent \
-                    OR bdk_utxos.deleted_at IS NOT NULL",
-            );
-
-            query_builder
-                .build()
-                .execute(tx.as_mut())
                 .await
                 .map_err(|e| bdk::Error::Generic(e.to_string()))?;
         }
@@ -219,7 +160,7 @@ impl Utxos {
     #[instrument(name = "bdk.utxos.mark_as_synced", skip(self, tx))]
     pub async fn mark_as_synced(
         &self,
-        tx: &mut SqlxTransaction<'_, Postgres>,
+        tx: &mut Transaction<'_, Postgres>,
         utxo: &LocalUtxo,
     ) -> Result<(), BdkError> {
         sqlx::query!(
@@ -237,7 +178,7 @@ impl Utxos {
     #[instrument(name = "bdk.utxos.mark_confirmed", skip(self, tx))]
     pub async fn mark_confirmed(
         &self,
-        tx: &mut SqlxTransaction<'_, Postgres>,
+        tx: &mut Transaction<'_, Postgres>,
         utxo: &LocalUtxo,
     ) -> Result<(), BdkError> {
         sqlx::query!(
@@ -255,7 +196,7 @@ impl Utxos {
     #[instrument(name = "bdk.utxos.find_confirmed_income_utxo", skip(self, tx))]
     pub async fn find_confirmed_income_utxo(
         &self,
-        tx: &mut SqlxTransaction<'_, Postgres>,
+        tx: &mut Transaction<'_, Postgres>,
         min_height: u32,
     ) -> Result<Option<ConfirmedIncomeUtxo>, BdkError> {
         let row = sqlx::query!(
@@ -307,7 +248,7 @@ impl Utxos {
     #[instrument(name = "bdk.utxos.find_and_remove_soft_deleted_utxo", skip_all)]
     pub async fn find_and_remove_soft_deleted_utxo(
         &self,
-        tx: &mut SqlxTransaction<'_, Postgres>,
+        tx: &mut Transaction<'_, Postgres>,
     ) -> Result<Option<(bitcoin::OutPoint, KeychainId)>, BdkError> {
         let row = sqlx::query!(
             r#"DELETE FROM bdk_utxos 

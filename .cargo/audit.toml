@@ -2,7 +2,8 @@
 ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0049",
-    # TODO: remove once electrum-client/bdk stops pulling rustls-webpki 0.101.7
+    # TODO: remove once electrum-client/bdk stop pulling rustls-webpki 0.101.7
     "RUSTSEC-2026-0098",
+    # TODO: remove once electrum-client/bdk stop pulling rustls-webpki 0.101.7
     "RUSTSEC-2026-0099",
 ]
