@@ -21,60 +21,272 @@ use index::Indexes;
 use script_pubkeys::ScriptPubkeys;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex, MutexGuard},
 };
 pub(super) use sync_times::SyncTimes;
 pub use transactions::*;
 pub use utxos::*;
 
-pub struct SqlxWalletDb {
+type ScriptPubkeyCache = HashMap<ScriptBuf, (KeychainKind, u32)>;
+type TransactionCache = HashMap<Txid, TransactionDetails>;
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum TxLookupMode {
+    Any,
+    RequireRaw,
+}
+
+#[derive(Clone)]
+struct WalletDbContext {
     rt: Handle,
     pool: PgPool,
     keychain_id: KeychainId,
-    utxos: Option<Vec<LocalUtxo>>,
-    cached_spks: Arc<Mutex<HashMap<ScriptBuf, (KeychainKind, u32)>>>,
-    addresses: HashMap<ScriptBuf, (KeychainKind, u32)>,
-    cached_txs: Arc<Mutex<HashMap<Txid, TransactionDetails>>>,
-    txs: HashMap<Txid, TransactionDetails>,
 }
 
-impl SqlxWalletDb {
-    pub fn new(pool: PgPool, keychain_id: KeychainId) -> Self {
+impl WalletDbContext {
+    fn new(pool: PgPool, keychain_id: KeychainId) -> Self {
         Self {
             rt: Handle::current(),
-            keychain_id,
             pool,
-            utxos: None,
-            addresses: HashMap::new(),
-            cached_spks: Arc::new(Mutex::new(HashMap::new())),
-            txs: HashMap::new(),
-            cached_txs: Arc::new(Mutex::new(HashMap::new())),
+            keychain_id,
+        }
+    }
+}
+
+#[derive(Default)]
+struct WalletBatchState {
+    utxos: Vec<LocalUtxo>,
+    addresses: ScriptPubkeyCache,
+    txs: TransactionCache,
+}
+
+#[derive(Clone)]
+struct WalletCache {
+    script_pubkeys: Arc<Mutex<ScriptPubkeyCache>>,
+    transactions: Arc<Mutex<TransactionCache>>,
+    // Process-local hint: true means this instance has already hydrated raw tx details
+    // from the DB at least once. It is intentionally not synchronized across processes.
+    raw_txs_fully_loaded: Arc<AtomicBool>,
+}
+
+impl WalletCache {
+    fn new() -> Self {
+        Self {
+            script_pubkeys: Arc::new(Mutex::new(HashMap::new())),
+            transactions: Arc::new(Mutex::new(HashMap::new())),
+            raw_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn load_all_txs(&self) -> Result<(), bdk::Error> {
-        let mut txs = self.cached_txs.lock().expect("poisoned txs cache lock");
-        if txs.is_empty() {
-            let loaded = self.rt.block_on(async {
-                let txs = Transactions::new(self.keychain_id, self.pool.clone());
-                txs.load_all().await
-            })?;
-            *txs = loaded;
-        }
+    fn lock_script_pubkeys(&self) -> Result<MutexGuard<'_, ScriptPubkeyCache>, bdk::Error> {
+        self.script_pubkeys
+            .lock()
+            .map_err(|_| bdk::Error::Generic("script pubkeys cache lock poisoned".to_string()))
+    }
+
+    fn lock_transactions(&self) -> Result<MutexGuard<'_, TransactionCache>, bdk::Error> {
+        self.transactions
+            .lock()
+            .map_err(|_| bdk::Error::Generic("transactions cache lock poisoned".to_string()))
+    }
+
+    fn get_script_pubkey_path(
+        &self,
+        script: &Script,
+    ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
+        let cache = self.lock_script_pubkeys()?;
+        Ok(cache.get(script).copied())
+    }
+
+    fn insert_script_pubkey(
+        &self,
+        script: ScriptBuf,
+        path: (KeychainKind, u32),
+    ) -> Result<(), bdk::Error> {
+        let mut cache = self.lock_script_pubkeys()?;
+        cache.insert(script, path);
         Ok(())
     }
 
-    fn lookup_tx(&self, txid: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
-        if let Some(tx) = self.txs.get(txid) {
-            return Ok(Some(tx.clone()));
+    fn extend_script_pubkeys<I>(&self, entries: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = (ScriptBuf, (KeychainKind, u32))>,
+    {
+        let mut cache = self.lock_script_pubkeys()?;
+        cache.extend(entries);
+        Ok(())
+    }
+
+    fn get_tx(&self, txid: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
+        let cache = self.lock_transactions()?;
+        Ok(cache.get(txid).cloned())
+    }
+
+    fn insert_tx(&self, txid: Txid, tx: TransactionDetails) -> Result<(), bdk::Error> {
+        let mut cache = self.lock_transactions()?;
+        cache.insert(txid, tx);
+        Ok(())
+    }
+
+    fn extend_txs<I>(&self, entries: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = (Txid, TransactionDetails)>,
+    {
+        let mut cache = self.lock_transactions()?;
+        cache.extend(entries);
+        Ok(())
+    }
+
+    fn all_txs(&self) -> Result<Vec<TransactionDetails>, bdk::Error> {
+        let cache = self.lock_transactions()?;
+        Ok(cache.values().cloned().collect())
+    }
+
+    fn raw_txs_fully_loaded(&self) -> bool {
+        self.raw_txs_fully_loaded.load(Ordering::Acquire)
+    }
+
+    fn set_raw_txs_fully_loaded(&self) {
+        self.raw_txs_fully_loaded.store(true, Ordering::Release);
+    }
+
+    fn remove_tx(&self, txid: &Txid) -> Result<(), bdk::Error> {
+        let mut cache = self.lock_transactions()?;
+        cache.remove(txid);
+        Ok(())
+    }
+}
+
+pub struct SqlxWalletDb {
+    ctx: WalletDbContext,
+    cache: WalletCache,
+    batch: WalletBatchState,
+}
+
+impl SqlxWalletDb {
+    fn unsupported_operation(operation: &str) -> bdk::Error {
+        bdk::Error::Generic(format!("{operation} is not supported by SqlxWalletDb"))
+    }
+
+    pub fn new(pool: PgPool, keychain_id: KeychainId) -> Self {
+        Self {
+            ctx: WalletDbContext::new(pool, keychain_id),
+            cache: WalletCache::new(),
+            batch: WalletBatchState::default(),
         }
-        self.load_all_txs()?;
-        Ok(self
-            .cached_txs
-            .lock()
-            .expect("poisoned txs cache lock")
-            .get(txid)
-            .cloned())
+    }
+
+    fn script_pubkeys_repo(&self) -> ScriptPubkeys {
+        ScriptPubkeys::new(self.ctx.keychain_id, self.ctx.pool.clone())
+    }
+
+    fn utxos_repo(&self) -> Utxos {
+        Utxos::new(self.ctx.keychain_id, self.ctx.pool.clone())
+    }
+
+    fn transactions_repo(&self) -> Transactions {
+        Transactions::new(self.ctx.keychain_id, self.ctx.pool.clone())
+    }
+
+    fn indexes_repo(&self) -> Indexes {
+        Indexes::new(self.ctx.keychain_id, self.ctx.pool.clone())
+    }
+
+    fn sync_times_repo(&self) -> SyncTimes {
+        SyncTimes::new(self.ctx.keychain_id, self.ctx.pool.clone())
+    }
+
+    fn descriptor_checksums_repo(&self) -> DescriptorChecksums {
+        DescriptorChecksums::new(self.ctx.keychain_id, self.ctx.pool.clone())
+    }
+
+    fn lookup_script_pubkey_path(
+        &self,
+        script: &Script,
+    ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
+        if let Some(path) = self.batch.addresses.get(script) {
+            return Ok(Some(*path));
+        }
+
+        if let Some(path) = self.cache.get_script_pubkey_path(script)? {
+            return Ok(Some(path));
+        }
+
+        let script_pubkey = script.to_owned();
+        let found = self
+            .ctx
+            .rt
+            .block_on(async { self.script_pubkeys_repo().find_path(&script_pubkey).await })?;
+
+        if let Some((kind, path)) = found {
+            let value = (KeychainKind::from(kind), path);
+            self.cache.insert_script_pubkey(script_pubkey, value)?;
+            return Ok(Some(value));
+        }
+
+        Ok(None)
+    }
+
+    fn lookup_tx_with_mode(
+        &self,
+        txid: &Txid,
+        mode: TxLookupMode,
+    ) -> Result<Option<TransactionDetails>, bdk::Error> {
+        if let Some(tx) = self.batch.txs.get(txid) {
+            if mode == TxLookupMode::Any || tx.transaction.is_some() {
+                return Ok(Some(tx.clone()));
+            }
+
+            return Ok(None);
+        }
+
+        if let Some(tx) = self.cache.get_tx(txid)? {
+            if mode == TxLookupMode::Any || tx.transaction.is_some() {
+                return Ok(Some(tx));
+            }
+
+            if self.cache.raw_txs_fully_loaded() {
+                return Ok(None);
+            }
+        }
+
+        let found = self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().find_by_id(txid).await })?;
+
+        // DB rows represent persisted TransactionDetails; this store does not persist a
+        // "summary-only" transaction format. A DB hit is therefore valid for both lookup
+        // modes (`Any` and `RequireRaw`).
+
+        if let Some(tx) = &found {
+            self.cache.insert_tx(tx.txid, tx.clone())?;
+        }
+
+        Ok(found)
+    }
+
+    fn lookup_tx(&self, txid: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
+        self.lookup_tx_with_mode(txid, TxLookupMode::Any)
+    }
+
+    fn overlay_batch_txs(
+        mut txs: HashMap<Txid, TransactionDetails>,
+        batch_txs: &HashMap<Txid, TransactionDetails>,
+        include_raw: bool,
+    ) -> HashMap<Txid, TransactionDetails> {
+        if include_raw {
+            txs.extend(batch_txs.iter().map(|(id, tx)| (*id, tx.clone())));
+        } else {
+            txs.extend(batch_txs.iter().map(|(id, tx)| {
+                let mut tx = tx.clone();
+                tx.transaction = None;
+                (*id, tx)
+            }));
+        }
+
+        txs
     }
 }
 
@@ -85,39 +297,38 @@ impl BatchOperations for SqlxWalletDb {
         keychain: KeychainKind,
         path: u32,
     ) -> Result<(), bdk::Error> {
-        self.addresses.insert(script.into(), (keychain, path));
+        self.batch.addresses.insert(script.into(), (keychain, path));
         Ok(())
     }
 
     fn set_utxo(&mut self, utxo: &LocalUtxo) -> Result<(), bdk::Error> {
-        if self.utxos.is_none() {
-            self.utxos = Some(Vec::new());
-        }
-        self.utxos.as_mut().unwrap().push(utxo.clone());
+        self.batch.utxos.push(utxo.clone());
         Ok(())
     }
 
     fn set_raw_tx(&mut self, _: &Transaction) -> Result<(), bdk::Error> {
-        unimplemented!()
+        Err(Self::unsupported_operation("set_raw_tx"))
     }
 
     fn set_tx(&mut self, tx: &TransactionDetails) -> Result<(), bdk::Error> {
-        self.txs.insert(tx.txid, tx.clone());
+        self.batch.txs.insert(tx.txid, tx.clone());
         Ok(())
     }
 
     fn set_last_index(&mut self, kind: KeychainKind, idx: u32) -> Result<(), bdk::Error> {
-        self.rt.block_on(async {
-            let indexes = Indexes::new(self.keychain_id, self.pool.clone());
-            indexes.persist_last_index(kind, idx).await
-        })
+        // NOTE: This write is intentionally immediate because BDK may call it outside of
+        // `commit_batch` flow.
+        self.ctx
+            .rt
+            .block_on(async { self.indexes_repo().persist_last_index(kind, idx).await })
     }
 
     fn set_sync_time(&mut self, time: SyncTime) -> Result<(), bdk::Error> {
-        self.rt.block_on(async {
-            let sync_times = SyncTimes::new(self.keychain_id, self.pool.clone());
-            sync_times.persist(time).await
-        })
+        // NOTE: This write is intentionally immediate because BDK may call it outside of
+        // `commit_batch` flow.
+        self.ctx
+            .rt
+            .block_on(async { self.sync_times_repo().persist(time).await })
     }
 
     fn del_script_pubkey_from_path(
@@ -125,23 +336,21 @@ impl BatchOperations for SqlxWalletDb {
         _: KeychainKind,
         _: u32,
     ) -> Result<Option<ScriptBuf>, bdk::Error> {
-        unimplemented!()
+        Err(Self::unsupported_operation("del_script_pubkey_from_path"))
     }
     fn del_path_from_script_pubkey(
         &mut self,
         _: &Script,
     ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
-        unimplemented!()
+        Err(Self::unsupported_operation("del_path_from_script_pubkey"))
     }
     fn del_utxo(&mut self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
-        self.rt.block_on(async {
-            Utxos::new(self.keychain_id, self.pool.clone())
-                .delete(outpoint)
-                .await
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.utxos_repo().delete(outpoint).await })
     }
     fn del_raw_tx(&mut self, _: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        unimplemented!()
+        Err(Self::unsupported_operation("del_raw_tx"))
     }
 
     fn del_tx(
@@ -149,16 +358,23 @@ impl BatchOperations for SqlxWalletDb {
         tx_id: &Txid,
         _include_raw: bool,
     ) -> Result<Option<TransactionDetails>, bdk::Error> {
-        self.rt.block_on(async {
-            let txs = Transactions::new(self.keychain_id, self.pool.clone());
-            txs.delete(tx_id).await
-        })
+        let deleted = self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().delete(tx_id).await })?;
+
+        if deleted.is_some() {
+            self.batch.txs.remove(tx_id);
+            self.cache.remove_tx(tx_id)?;
+        }
+
+        Ok(deleted)
     }
     fn del_last_index(&mut self, _: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
-        unimplemented!()
+        Err(Self::unsupported_operation("del_last_index"))
     }
     fn del_sync_time(&mut self) -> Result<Option<SyncTime>, bdk::Error> {
-        unimplemented!()
+        Err(Self::unsupported_operation("del_sync_time"))
     }
 }
 
@@ -171,8 +387,8 @@ impl Database for SqlxWalletDb {
     where
         B: AsRef<[u8]>,
     {
-        self.rt.block_on(async {
-            let checksums = DescriptorChecksums::new(self.keychain_id, self.pool.clone());
+        self.ctx.rt.block_on(async {
+            let checksums = self.descriptor_checksums_repo();
             checksums
                 .check_or_persist_descriptor_checksum(keychain, script_bytes.as_ref())
                 .await?;
@@ -184,31 +400,45 @@ impl Database for SqlxWalletDb {
         &self,
         keychain: Option<KeychainKind>,
     ) -> Result<Vec<ScriptBuf>, bdk::Error> {
-        self.rt.block_on(async {
-            let script_pubkeys = ScriptPubkeys::new(self.keychain_id, self.pool.clone());
-            let scripts = script_pubkeys.list_scripts(keychain).await?;
-            Ok(scripts)
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.script_pubkeys_repo().list_scripts(keychain).await })
     }
     fn iter_utxos(&self) -> Result<Vec<LocalUtxo>, bdk::Error> {
-        self.rt.block_on(async {
-            Utxos::new(self.keychain_id, self.pool.clone())
-                .list_local_utxos()
-                .await
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.utxos_repo().list_local_utxos().await })
     }
     fn iter_raw_txs(&self) -> Result<Vec<Transaction>, bdk::Error> {
-        unimplemented!()
+        Err(Self::unsupported_operation("iter_raw_txs"))
     }
 
-    fn iter_txs(&self, _: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
-        self.load_all_txs()?;
-        Ok(self
-            .cached_txs
-            .lock()
-            .expect("poisoned txs cache lock")
-            .values()
-            .cloned()
+    fn iter_txs(&self, include_raw: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
+        let txs = if include_raw {
+            if self.cache.raw_txs_fully_loaded() {
+                self.cache
+                    .all_txs()?
+                    .into_iter()
+                    .map(|tx| (tx.txid, tx))
+                    .collect()
+            } else {
+                let loaded = self
+                    .ctx
+                    .rt
+                    .block_on(async { self.transactions_repo().load_all().await })?;
+                self.cache
+                    .extend_txs(loaded.iter().map(|(txid, tx)| (*txid, tx.clone())))?;
+                self.cache.set_raw_txs_fully_loaded();
+                loaded
+            }
+        } else {
+            self.ctx
+                .rt
+                .block_on(async { self.transactions_repo().load_all_summaries().await })?
+        };
+
+        Ok(Self::overlay_batch_txs(txs, &self.batch.txs, include_raw)
+            .into_values()
             .collect())
     }
 
@@ -217,67 +447,53 @@ impl Database for SqlxWalletDb {
         keychain: KeychainKind,
         path: u32,
     ) -> Result<Option<ScriptBuf>, bdk::Error> {
-        self.rt.block_on(async {
-            let script_pubkeys = ScriptPubkeys::new(self.keychain_id, self.pool.clone());
-            script_pubkeys.find_script(keychain, path).await
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.script_pubkeys_repo().find_script(keychain, path).await })
     }
     fn get_path_from_script_pubkey(
         &self,
         script: &Script,
     ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
-        let mut cache = self.cached_spks.lock().expect("poisoned spk cache lock");
-        if cache.is_empty() {
-            let loaded = self.rt.block_on(async {
-                let script_pubkeys = ScriptPubkeys::new(self.keychain_id, self.pool.clone());
-                script_pubkeys.load_all().await
-            })?;
-            *cache = loaded;
-        }
-
-        if let Some(res) = cache.get(script) {
-            Ok(Some(*res))
-        } else if let Some(res) = self.addresses.get(script) {
-            Ok(Some(*res))
-        } else {
-            Ok(None)
-        }
+        self.lookup_script_pubkey_path(script)
     }
     fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
-        self.rt.block_on(async {
-            Utxos::new(self.keychain_id, self.pool.clone())
-                .find(outpoint)
-                .await
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.utxos_repo().find(outpoint).await })
     }
     fn get_raw_tx(&self, tx_id: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        self.lookup_tx(tx_id)
+        self.lookup_tx_with_mode(tx_id, TxLookupMode::RequireRaw)
             .map(|tx| tx.and_then(|tx| tx.transaction))
     }
     fn get_tx(
         &self,
         tx_id: &Txid,
-        _include_raw: bool,
+        include_raw: bool,
     ) -> Result<Option<TransactionDetails>, bdk::Error> {
-        self.lookup_tx(tx_id)
+        self.lookup_tx(tx_id).map(|tx| {
+            tx.map(|mut tx| {
+                if !include_raw {
+                    tx.transaction = None;
+                }
+                tx
+            })
+        })
     }
     fn get_last_index(&self, kind: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
-        self.rt.block_on(async {
-            let last_indexes = Indexes::new(self.keychain_id, self.pool.clone());
-            last_indexes.get_latest(kind).await
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.indexes_repo().get_latest(kind).await })
     }
     fn get_sync_time(&self) -> Result<Option<SyncTime>, bdk::Error> {
-        self.rt.block_on(async {
-            let sync_times = SyncTimes::new(self.keychain_id, self.pool.clone());
-            sync_times.get().await
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.sync_times_repo().get().await })
     }
     fn increment_last_index(&mut self, keychain: KeychainKind) -> Result<u32, bdk::Error> {
-        self.rt.block_on(async {
-            let indexes = Indexes::new(self.keychain_id, self.pool.clone());
-            indexes.increment(keychain).await
-        })
+        self.ctx
+            .rt
+            .block_on(async { self.indexes_repo().increment(keychain).await })
     }
 }
 
@@ -285,52 +501,173 @@ impl BatchDatabase for SqlxWalletDb {
     type Batch = Self;
 
     fn begin_batch(&self) -> <Self as BatchDatabase>::Batch {
-        let mut res = SqlxWalletDb::new(self.pool.clone(), self.keychain_id);
-        res.cached_spks = Arc::clone(&self.cached_spks);
-        res.cached_txs = Arc::clone(&self.cached_txs);
-        res
+        SqlxWalletDb {
+            ctx: self.ctx.clone(),
+            cache: self.cache.clone(),
+            batch: WalletBatchState::default(),
+        }
     }
 
     fn commit_batch(
         &mut self,
         mut batch: <Self as BatchDatabase>::Batch,
     ) -> Result<(), bdk::Error> {
-        self.cached_spks
-            .lock()
-            .expect("poisoned spk cache lock")
-            .extend(
-                batch
-                    .addresses
-                    .iter()
-                    .map(|(s, (k, p))| (s.clone(), (*k, *p))),
-            );
+        // Atomic scope here is limited to staged script pubkeys, utxos, and transactions.
+        // `set_last_index` / `set_sync_time` remain immediate writes by design.
+        let (addresses_for_cache, addresses_for_db): (Vec<_>, Vec<_>) = batch
+            .batch
+            .addresses
+            .drain()
+            .map(|(script, (keychain, path))| {
+                let cache_entry = (script.clone(), (keychain, path));
+                let db_entry = (BdkKeychainKind::from(keychain), path, script);
+                (cache_entry, db_entry)
+            })
+            .unzip();
 
-        self.cached_txs
-            .lock()
-            .expect("poisoned txs cache lock")
-            .extend(batch.txs.iter().map(|(id, tx)| (*id, tx.clone())));
+        let (txs_for_cache, txs_for_db): (Vec<_>, Vec<_>) = batch
+            .batch
+            .txs
+            .drain()
+            .map(|(txid, tx)| ((txid, tx.clone()), tx))
+            .unzip();
 
-        self.rt.block_on(async move {
-            if !batch.addresses.is_empty() {
-                let addresses: Vec<_> = batch
-                    .addresses
-                    .drain()
-                    .map(|(s, (k, p))| (BdkKeychainKind::from(k), p, s))
-                    .collect();
-                let repo = ScriptPubkeys::new(batch.keychain_id, batch.pool.clone());
-                repo.persist_all(addresses).await?;
+        let utxos_for_db = std::mem::take(&mut batch.batch.utxos);
+        let keychain_id = batch.ctx.keychain_id;
+        let pool = batch.ctx.pool.clone();
+
+        batch.ctx.rt.block_on(async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+            if !addresses_for_db.is_empty() {
+                ScriptPubkeys::new(keychain_id, pool.clone())
+                    .persist_all_in_tx(&mut tx, addresses_for_db)
+                    .await?;
             }
 
-            if let Some(utxos) = batch.utxos.take() {
-                let repo = Utxos::new(batch.keychain_id, batch.pool.clone());
-                repo.persist_all(utxos).await?;
+            if !utxos_for_db.is_empty() {
+                Utxos::new(keychain_id, pool.clone())
+                    .persist_all_in_tx(&mut tx, utxos_for_db)
+                    .await?;
             }
-            if !batch.txs.is_empty() {
-                let txs = batch.txs.drain().map(|(_, tx)| tx).collect();
-                let repo = Transactions::new(batch.keychain_id, batch.pool.clone());
-                repo.persist_all(txs).await?;
+
+            if !txs_for_db.is_empty() {
+                Transactions::new(keychain_id, pool)
+                    .persist_all_in_tx(&mut tx, txs_for_db)
+                    .await?;
             }
+
+            tx.commit()
+                .await
+                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
             Ok::<_, bdk::Error>(())
-        })
+        })?;
+
+        self.cache.extend_script_pubkeys(addresses_for_cache)?;
+        self.cache.extend_txs(txs_for_cache)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bdk::bitcoin::hashes::Hash;
+
+    fn tx_details(txid: Txid) -> TransactionDetails {
+        TransactionDetails {
+            transaction: None,
+            txid,
+            received: 0,
+            sent: 0,
+            fee: None,
+            confirmation_time: None,
+        }
+    }
+
+    #[test]
+    fn wallet_cache_can_insert_get_and_remove_transactions() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+        let details = tx_details(txid);
+
+        cache
+            .insert_tx(txid, details.clone())
+            .expect("insert should succeed");
+        let loaded = cache.get_tx(&txid).expect("get should succeed");
+        assert_eq!(loaded, Some(details));
+
+        cache.remove_tx(&txid).expect("remove should succeed");
+        let loaded = cache.get_tx(&txid).expect("get should succeed");
+        assert_eq!(loaded, None);
+    }
+
+    #[test]
+    fn wallet_cache_can_insert_and_get_script_pubkey_paths() {
+        let cache = WalletCache::new();
+        let script = ScriptBuf::new();
+        let path = (KeychainKind::External, 42);
+
+        cache
+            .insert_script_pubkey(script.clone(), path)
+            .expect("insert should succeed");
+
+        let loaded = cache
+            .get_script_pubkey_path(script.as_script())
+            .expect("get should succeed");
+        assert_eq!(loaded, Some(path));
+    }
+
+    #[test]
+    fn wallet_cache_raw_txs_loaded_flag_defaults_false_and_can_be_set() {
+        let cache = WalletCache::new();
+        assert!(!cache.raw_txs_fully_loaded());
+
+        cache.set_raw_txs_fully_loaded();
+        assert!(cache.raw_txs_fully_loaded());
+    }
+
+    #[test]
+    fn overlay_batch_txs_strips_raw_when_include_raw_is_false() {
+        let txid = Txid::all_zeros();
+        let mut base = HashMap::new();
+        base.insert(txid, tx_details(txid));
+
+        let raw_tx = bdk::bitcoin::Transaction {
+            version: 2,
+            lock_time: bdk::bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+
+        let mut batch = HashMap::new();
+        let mut batch_tx = tx_details(txid);
+        batch_tx.transaction = Some(raw_tx);
+        batch.insert(txid, batch_tx);
+
+        let merged = SqlxWalletDb::overlay_batch_txs(base, &batch, false);
+        assert!(merged
+            .get(&txid)
+            .expect("merged tx should exist")
+            .transaction
+            .is_none());
+    }
+
+    #[test]
+    fn wallet_cache_all_txs_returns_cached_values() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .insert_tx(txid, tx_details(txid))
+            .expect("insert should succeed");
+
+        let txs = cache.all_txs().expect("all_txs should succeed");
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].txid, txid);
     }
 }
