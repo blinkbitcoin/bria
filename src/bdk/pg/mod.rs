@@ -30,6 +30,12 @@ pub use utxos::*;
 type ScriptPubkeyCache = HashMap<ScriptBuf, (KeychainKind, u32)>;
 type TransactionCache = HashMap<Txid, TransactionDetails>;
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum TxLookupMode {
+    Any,
+    RequireRaw,
+}
+
 #[derive(Clone)]
 struct WalletDbContext {
     rt: Handle,
@@ -200,13 +206,21 @@ impl SqlxWalletDb {
         Ok(None)
     }
 
-    fn lookup_tx(&self, txid: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
+    fn lookup_tx_with_mode(
+        &self,
+        txid: &Txid,
+        mode: TxLookupMode,
+    ) -> Result<Option<TransactionDetails>, bdk::Error> {
         if let Some(tx) = self.batch.txs.get(txid) {
-            return Ok(Some(tx.clone()));
+            if mode == TxLookupMode::Any || tx.transaction.is_some() {
+                return Ok(Some(tx.clone()));
+            }
         }
 
         if let Some(tx) = self.cache.get_tx(txid)? {
-            return Ok(Some(tx));
+            if mode == TxLookupMode::Any || tx.transaction.is_some() {
+                return Ok(Some(tx));
+            }
         }
 
         let found = self
@@ -214,11 +228,19 @@ impl SqlxWalletDb {
             .rt
             .block_on(async { self.transactions_repo().find_by_id(txid).await })?;
 
+        // DB rows represent persisted TransactionDetails; this store does not persist a
+        // "summary-only" transaction format. A DB hit is therefore valid for both lookup
+        // modes (`Any` and `RequireRaw`).
+
         if let Some(tx) = &found {
             self.cache.insert_tx(tx.txid, tx.clone())?;
         }
 
         Ok(found)
+    }
+
+    fn lookup_tx(&self, txid: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
+        self.lookup_tx_with_mode(txid, TxLookupMode::Any)
     }
 }
 
@@ -250,12 +272,16 @@ impl BatchOperations for SqlxWalletDb {
     }
 
     fn set_last_index(&mut self, kind: KeychainKind, idx: u32) -> Result<(), bdk::Error> {
+        // NOTE: This write is intentionally immediate because BDK may call it outside of
+        // `commit_batch` flow.
         self.ctx
             .rt
             .block_on(async { self.indexes_repo().persist_last_index(kind, idx).await })
     }
 
     fn set_sync_time(&mut self, time: SyncTime) -> Result<(), bdk::Error> {
+        // NOTE: This write is intentionally immediate because BDK may call it outside of
+        // `commit_batch` flow.
         self.ctx
             .rt
             .block_on(async { self.sync_times_repo().persist(time).await })
@@ -369,6 +395,8 @@ impl Database for SqlxWalletDb {
         if include_raw {
             txs.extend(self.batch.txs.iter().map(|(id, tx)| (*id, tx.clone())));
         } else {
+            // `load_all_summaries` already strips raw transactions from persisted rows, but
+            // batch entries can still carry `transaction: Some(_)`; normalize them here.
             txs.extend(self.batch.txs.iter().map(|(id, tx)| {
                 let mut tx = tx.clone();
                 tx.transaction = None;
@@ -400,30 +428,8 @@ impl Database for SqlxWalletDb {
             .block_on(async { self.utxos_repo().find(outpoint).await })
     }
     fn get_raw_tx(&self, tx_id: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        if let Some(transaction) = self
-            .batch
-            .txs
-            .get(tx_id)
-            .and_then(|tx| tx.transaction.clone())
-        {
-            return Ok(Some(transaction));
-        }
-
-        if let Some(transaction) = self.cache.get_tx(tx_id)?.and_then(|tx| tx.transaction) {
-            return Ok(Some(transaction));
-        }
-
-        let found = self
-            .ctx
-            .rt
-            .block_on(async { self.transactions_repo().find_by_id(tx_id).await })?;
-
-        if let Some(tx) = found {
-            self.cache.insert_tx(tx.txid, tx.clone())?;
-            Ok(tx.transaction)
-        } else {
-            Ok(None)
-        }
+        self.lookup_tx_with_mode(tx_id, TxLookupMode::RequireRaw)
+            .map(|tx| tx.and_then(|tx| tx.transaction))
     }
     fn get_tx(
         &self,
@@ -487,23 +493,32 @@ impl BatchDatabase for SqlxWalletDb {
         let pool = batch.ctx.pool.clone();
 
         batch.ctx.rt.block_on(async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
             if !addresses_for_db.is_empty() {
                 ScriptPubkeys::new(keychain_id, pool.clone())
-                    .persist_all(addresses_for_db)
+                    .persist_all_in_tx(&mut tx, addresses_for_db)
                     .await?;
             }
 
             if !utxos_for_db.is_empty() {
                 Utxos::new(keychain_id, pool.clone())
-                    .persist_all(utxos_for_db)
+                    .persist_all_in_tx(&mut tx, utxos_for_db)
                     .await?;
             }
 
             if !txs_for_db.is_empty() {
                 Transactions::new(keychain_id, pool)
-                    .persist_all(txs_for_db)
+                    .persist_all_in_tx(&mut tx, txs_for_db)
                     .await?;
             }
+
+            tx.commit()
+                .await
+                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
             Ok::<_, bdk::Error>(())
         })?;

@@ -1,5 +1,5 @@
 use bdk::{bitcoin::Txid, BlockTime, LocalUtxo, TransactionDetails};
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction as SqlxTransaction};
 use tracing::instrument;
 
 use std::collections::HashMap;
@@ -36,6 +36,8 @@ impl Transactions {
     }
 
     #[instrument(name = "bdk.transactions.persist", skip_all)]
+    // Retained for non-transactional call sites and focused tests.
+    #[allow(dead_code)]
     pub async fn persist_all(&self, txs: Vec<TransactionDetails>) -> Result<(), bdk::Error> {
         const BATCH_SIZE: usize = 2000;
         let batches = txs.chunks(BATCH_SIZE);
@@ -85,9 +87,72 @@ impl Transactions {
                     OR bdk_transactions.deleted_at IS NOT NULL",
             );
 
-            let query = query_builder.build();
-            query
+            query_builder
+                .build()
                 .execute(&self.pool)
+                .await
+                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn persist_all_in_tx(
+        &self,
+        tx: &mut SqlxTransaction<'_, Postgres>,
+        txs: Vec<TransactionDetails>,
+    ) -> Result<(), bdk::Error> {
+        const BATCH_SIZE: usize = 2000;
+        let batches = txs.chunks(BATCH_SIZE);
+
+        for batch in batches {
+            let serialized_batch = batch
+                .iter()
+                .map(|tx| {
+                    Ok::<_, bdk::Error>((
+                        tx.txid.to_string(),
+                        serde_json::to_value(tx).map_err(|e| {
+                            bdk::Error::Generic(format!("failed to serialize tx details: {e}"))
+                        })?,
+                        tx.sent as i64,
+                        tx.confirmation_time.as_ref().map(|t| t.height as i32),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                r#"
+            INSERT INTO bdk_transactions
+            (keychain_id, tx_id, details_json, sent, height)"#,
+            );
+
+            query_builder.push_values(
+                serialized_batch,
+                |mut builder, (tx_id, details_json, sent, height)| {
+                    builder.push_bind(self.keychain_id as KeychainId);
+                    builder.push_bind(tx_id);
+                    builder.push_bind(details_json);
+                    builder.push_bind(sent);
+                    builder.push_bind(height);
+                },
+            );
+
+            query_builder.push(
+                "ON CONFLICT (keychain_id, tx_id) DO UPDATE \
+                 SET details_json = EXCLUDED.details_json,\
+                     sent = EXCLUDED.sent,\
+                     height = EXCLUDED.height,\
+                     modified_at = NOW(),\
+                     deleted_at = NULL \
+                 WHERE bdk_transactions.details_json IS DISTINCT FROM EXCLUDED.details_json \
+                    OR bdk_transactions.sent IS DISTINCT FROM EXCLUDED.sent \
+                    OR bdk_transactions.height IS DISTINCT FROM EXCLUDED.height \
+                    OR bdk_transactions.deleted_at IS NOT NULL",
+            );
+
+            query_builder
+                .build()
+                .execute(tx.as_mut())
                 .await
                 .map_err(|e| bdk::Error::Generic(e.to_string()))?;
         }
@@ -116,7 +181,6 @@ impl Transactions {
         .transpose()
     }
 
-    #[allow(dead_code)]
     #[instrument(name = "bdk.transactions.find_by_id", skip_all)]
     pub async fn find_by_id(&self, tx_id: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
         let tx = sqlx::query!(
@@ -304,7 +368,7 @@ impl Transactions {
     #[instrument(name = "bdk.transactions.find_confirmed_spend_tx", skip(self, tx))]
     pub async fn find_confirmed_spend_tx(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut SqlxTransaction<'_, Postgres>,
         min_height: u32,
     ) -> Result<Option<ConfirmedSpendTransaction>, BdkError> {
         let rows = sqlx::query!(r#"
@@ -396,7 +460,7 @@ impl Transactions {
     #[instrument(name = "bdk.transactions.mark_confirmed", skip(self))]
     pub async fn mark_confirmed(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut SqlxTransaction<'_, Postgres>,
         tx_id: bitcoin::Txid,
     ) -> Result<(), BdkError> {
         sqlx::query!(
@@ -416,7 +480,7 @@ impl Transactions {
     )]
     pub async fn delete_transaction_if_no_more_utxos_exist(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut SqlxTransaction<'_, Postgres>,
         outpoint: bitcoin::OutPoint,
     ) -> Result<(), BdkError> {
         sqlx::query!(
