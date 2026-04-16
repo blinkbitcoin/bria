@@ -400,16 +400,17 @@ impl Database for SqlxWalletDb {
             .block_on(async { self.utxos_repo().find(outpoint).await })
     }
     fn get_raw_tx(&self, tx_id: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        if let Some(tx) = self.batch.txs.get(tx_id) {
-            if let Some(transaction) = &tx.transaction {
-                return Ok(Some(transaction.clone()));
-            }
+        if let Some(transaction) = self
+            .batch
+            .txs
+            .get(tx_id)
+            .and_then(|tx| tx.transaction.clone())
+        {
+            return Ok(Some(transaction));
         }
 
-        if let Some(tx) = self.cache.get_tx(tx_id)? {
-            if let Some(transaction) = tx.transaction {
-                return Ok(Some(transaction));
-            }
+        if let Some(transaction) = self.cache.get_tx(tx_id)?.and_then(|tx| tx.transaction) {
+            return Ok(Some(transaction));
         }
 
         let found = self
@@ -463,26 +464,23 @@ impl BatchDatabase for SqlxWalletDb {
         &mut self,
         mut batch: <Self as BatchDatabase>::Batch,
     ) -> Result<(), bdk::Error> {
-        let addresses_for_cache: Vec<_> = batch
-            .batch
-            .addresses
-            .iter()
-            .map(|(script, (keychain, path))| (script.clone(), (*keychain, *path)))
-            .collect();
-        let addresses_for_db: Vec<_> = batch
+        let (addresses_for_cache, addresses_for_db): (Vec<_>, Vec<_>) = batch
             .batch
             .addresses
             .drain()
-            .map(|(script, (keychain, path))| (BdkKeychainKind::from(keychain), path, script))
-            .collect();
+            .map(|(script, (keychain, path))| {
+                let cache_entry = (script.clone(), (keychain, path));
+                let db_entry = (BdkKeychainKind::from(keychain), path, script);
+                (cache_entry, db_entry)
+            })
+            .unzip();
 
-        let txs_for_cache: Vec<_> = batch
+        let (txs_for_cache, txs_for_db): (Vec<_>, Vec<_>) = batch
             .batch
             .txs
-            .iter()
-            .map(|(txid, tx)| (*txid, tx.clone()))
-            .collect();
-        let txs_for_db: Vec<_> = batch.batch.txs.drain().map(|(_, tx)| tx).collect();
+            .drain()
+            .map(|(txid, tx)| ((txid, tx.clone()), tx))
+            .unzip();
 
         let utxos_for_db = std::mem::take(&mut batch.batch.utxos);
         let keychain_id = batch.ctx.keychain_id;
