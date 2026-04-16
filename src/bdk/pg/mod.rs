@@ -21,6 +21,7 @@ use index::Indexes;
 use script_pubkeys::ScriptPubkeys;
 use std::{
     collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex, MutexGuard},
 };
 pub(super) use sync_times::SyncTimes;
@@ -64,6 +65,7 @@ struct WalletBatchState {
 struct WalletCache {
     script_pubkeys: Arc<Mutex<ScriptPubkeyCache>>,
     transactions: Arc<Mutex<TransactionCache>>,
+    raw_txs_fully_loaded: Arc<AtomicBool>,
 }
 
 impl WalletCache {
@@ -71,6 +73,7 @@ impl WalletCache {
         Self {
             script_pubkeys: Arc::new(Mutex::new(HashMap::new())),
             transactions: Arc::new(Mutex::new(HashMap::new())),
+            raw_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -131,6 +134,19 @@ impl WalletCache {
         let mut cache = self.lock_transactions()?;
         cache.extend(entries);
         Ok(())
+    }
+
+    fn all_txs(&self) -> Result<Vec<TransactionDetails>, bdk::Error> {
+        let cache = self.lock_transactions()?;
+        Ok(cache.values().cloned().collect())
+    }
+
+    fn raw_txs_fully_loaded(&self) -> bool {
+        self.raw_txs_fully_loaded.load(Ordering::Relaxed)
+    }
+
+    fn set_raw_txs_fully_loaded(&self) {
+        self.raw_txs_fully_loaded.store(true, Ordering::Relaxed);
     }
 
     fn remove_tx(&self, txid: &Txid) -> Result<(), bdk::Error> {
@@ -383,9 +399,22 @@ impl Database for SqlxWalletDb {
 
     fn iter_txs(&self, include_raw: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
         let mut txs = if include_raw {
-            self.ctx
-                .rt
-                .block_on(async { self.transactions_repo().load_all().await })?
+            if self.cache.raw_txs_fully_loaded() {
+                self.cache
+                    .all_txs()?
+                    .into_iter()
+                    .map(|tx| (tx.txid, tx))
+                    .collect()
+            } else {
+                let loaded = self
+                    .ctx
+                    .rt
+                    .block_on(async { self.transactions_repo().load_all().await })?;
+                self.cache
+                    .extend_txs(loaded.iter().map(|(txid, tx)| (*txid, tx.clone())))?;
+                self.cache.set_raw_txs_fully_loaded();
+                loaded
+            }
         } else {
             self.ctx
                 .rt
@@ -576,5 +605,14 @@ mod tests {
             .get_script_pubkey_path(script.as_script())
             .expect("get should succeed");
         assert_eq!(loaded, Some(path));
+    }
+
+    #[test]
+    fn wallet_cache_raw_txs_loaded_flag_defaults_false_and_can_be_set() {
+        let cache = WalletCache::new();
+        assert!(!cache.raw_txs_fully_loaded());
+
+        cache.set_raw_txs_fully_loaded();
+        assert!(cache.raw_txs_fully_loaded());
     }
 }
