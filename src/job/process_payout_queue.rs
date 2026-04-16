@@ -128,7 +128,7 @@ pub(super) async fn execute<'a>(
 
         // Not using a Box here causes an interesting compile error with rustc 1.69.0
         let included_utxos: Box<dyn Iterator<Item = (KeychainId, bitcoin::OutPoint)> + Send> =
-            Box::new(included_utxos.into_iter().flat_map(|(_, keychain_map)| {
+            Box::new(included_utxos.into_values().flat_map(|keychain_map| {
                 keychain_map
                     .into_iter()
                     .flat_map(|(keychain_id, outpoints)| {
