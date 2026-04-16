@@ -180,7 +180,7 @@ pub fn allocate_proportional_fees(
         .sum();
 
     let mut remainder = total_fees;
-    payouts.sort_by(|a, b| a.1.cmp(&b.1));
+    payouts.sort_by_key(|a| a.1);
 
     let n_payouts = payouts.len();
     let mut proportional_fees = HashMap::new();
