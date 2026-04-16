@@ -1,4 +1,4 @@
-use bdk::{bitcoin::Txid, LocalUtxo, TransactionDetails};
+use bdk::{bitcoin::Txid, BlockTime, LocalUtxo, TransactionDetails};
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use tracing::instrument;
 
@@ -41,18 +41,32 @@ impl Transactions {
         let batches = txs.chunks(BATCH_SIZE);
 
         for batch in batches {
+            let serialized_batch = batch
+                .iter()
+                .map(|tx| {
+                    Ok::<_, bdk::Error>((
+                        tx.txid.to_string(),
+                        serde_json::to_value(tx).map_err(|e| {
+                            bdk::Error::Generic(format!("failed to serialize tx details: {e}"))
+                        })?,
+                        tx.sent as i64,
+                        tx.confirmation_time.as_ref().map(|t| t.height as i32),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"
             INSERT INTO bdk_transactions
             (keychain_id, tx_id, details_json, sent, height)"#,
             );
 
-            query_builder.push_values(batch, |mut builder, tx| {
+            query_builder.push_values(serialized_batch, |mut builder, tx| {
                 builder.push_bind(self.keychain_id as KeychainId);
-                builder.push_bind(tx.txid.to_string());
-                builder.push_bind(serde_json::to_value(tx).unwrap());
-                builder.push_bind(tx.sent as i64);
-                builder.push_bind(tx.confirmation_time.as_ref().map(|t| t.height as i32));
+                builder.push_bind(tx.0);
+                builder.push_bind(tx.1);
+                builder.push_bind(tx.2);
+                builder.push_bind(tx.3);
             });
 
             query_builder.push(
@@ -92,9 +106,11 @@ impl Transactions {
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-        Ok(tx.map(|tx| {
-            serde_json::from_value(tx.details_json).expect("could not deserialize tx details")
-        }))
+        tx.map(|tx| {
+            serde_json::from_value(tx.details_json)
+                .map_err(|e| bdk::Error::Generic(format!("could not deserialize tx details: {e}")))
+        })
+        .transpose()
     }
 
     #[allow(dead_code)]
@@ -109,7 +125,11 @@ impl Transactions {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        Ok(tx.map(|tx| serde_json::from_value(tx.details_json).unwrap()))
+        tx.map(|tx| {
+            serde_json::from_value(tx.details_json)
+                .map_err(|e| bdk::Error::Generic(format!("could not deserialize tx details: {e}")))
+        })
+        .transpose()
     }
 
     #[instrument(name = "bdk.transactions.load_all", skip(self), fields(n_rows))]
@@ -123,13 +143,77 @@ impl Transactions {
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
         tracing::Span::current().record("n_rows", txs.len());
-        Ok(txs
-            .into_iter()
+        txs.into_iter()
             .map(|tx| {
-                let tx = serde_json::from_value::<TransactionDetails>(tx.details_json).unwrap();
-                (tx.txid, tx)
+                serde_json::from_value::<TransactionDetails>(tx.details_json)
+                    .map(|tx| (tx.txid, tx))
+                    .map_err(|e| {
+                        bdk::Error::Generic(format!("could not deserialize tx details: {e}"))
+                    })
             })
-            .collect())
+            .collect()
+    }
+
+    #[instrument(
+        name = "bdk.transactions.load_all_summaries",
+        skip(self),
+        fields(n_rows)
+    )]
+    pub async fn load_all_summaries(
+        &self,
+    ) -> Result<HashMap<Txid, TransactionDetails>, bdk::Error> {
+        let rows = sqlx::query!(
+            r#"
+        SELECT tx_id, sent, height,
+               (details_json->>'received')::BIGINT AS "received?",
+               (details_json->>'fee')::BIGINT AS "fee?",
+               (details_json->'confirmation_time'->>'timestamp')::BIGINT AS "confirmation_timestamp?"
+          FROM bdk_transactions
+         WHERE keychain_id = $1 AND deleted_at IS NULL"#,
+            self.keychain_id as KeychainId,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+        tracing::Span::current().record("n_rows", rows.len());
+
+        fn to_u64(value: i64, field: &str) -> Result<u64, bdk::Error> {
+            if value < 0 {
+                return Err(bdk::Error::Generic(format!(
+                    "negative {field} value in bdk_transactions"
+                )));
+            }
+            Ok(value as u64)
+        }
+
+        rows.into_iter()
+            .map(|row| {
+                let txid = row
+                    .tx_id
+                    .parse::<Txid>()
+                    .map_err(|e| bdk::Error::Generic(format!("invalid tx_id in db: {e}")))?;
+
+                let confirmation_time = match (row.height, row.confirmation_timestamp) {
+                    (Some(height), Some(timestamp)) => Some(BlockTime {
+                        height: height as u32,
+                        timestamp: to_u64(timestamp, "confirmation timestamp")?,
+                    }),
+                    _ => None,
+                };
+
+                let details = TransactionDetails {
+                    txid,
+                    transaction: None,
+                    received: to_u64(row.received.unwrap_or_default(), "received")?,
+                    sent: to_u64(row.sent, "sent")?,
+                    fee: row.fee.map(|f| to_u64(f, "fee")).transpose()?,
+                    confirmation_time,
+                };
+
+                Ok((txid, details))
+            })
+            .collect()
     }
 
     #[instrument(name = "bdk.transactions.find_unsynced_tx", skip(self), fields(n_rows))]
@@ -184,11 +268,22 @@ impl Transactions {
                 inputs.push((utxo, row.path as u32));
             }
             if tx_id.is_none() {
-                tx_id = Some(row.tx_id.parse().expect("couldn't parse tx_id"));
+                tx_id = Some(row.tx_id.parse().map_err(|e| {
+                    bdk::Error::Generic(format!("invalid tx id from bdk_transactions: {e}"))
+                })?);
                 let details: TransactionDetails = serde_json::from_value(row.details_json)?;
                 total_utxo_in_sats = Satoshis::from(details.sent);
-                fee_sats = Satoshis::from(details.fee.expect("Fee"));
-                vsize = details.transaction.expect("transaction").vsize() as u64;
+                fee_sats = Satoshis::from(details.fee.ok_or_else(|| {
+                    bdk::Error::Generic("missing fee in unsynced transaction details".to_string())
+                })?);
+                vsize = details
+                    .transaction
+                    .ok_or_else(|| {
+                        bdk::Error::Generic(
+                            "missing raw transaction in unsynced transaction details".to_string(),
+                        )
+                    })?
+                    .vsize() as u64;
                 confirmation_time = details.confirmation_time;
             }
         }
@@ -257,19 +352,29 @@ impl Transactions {
                 inputs.push(utxo);
             }
             if tx_id.is_none() {
-                tx_id = Some(row.tx_id.parse().expect("couldn't parse tx_id"));
+                tx_id = Some(row.tx_id.parse().map_err(|e| {
+                    bdk::Error::Generic(format!("invalid tx id from bdk_transactions: {e}"))
+                })?);
                 let details: TransactionDetails = serde_json::from_value(row.details_json)?;
                 confirmation_time = details.confirmation_time;
             }
         }
 
-        Ok(tx_id.map(|tx_id| ConfirmedSpendTransaction {
-            tx_id,
-            confirmation_time: confirmation_time
-                .expect("query should always return confirmation_time"),
-            inputs,
-            outputs,
-        }))
+        if let Some(tx_id) = tx_id {
+            let confirmation_time = confirmation_time.ok_or_else(|| {
+                bdk::Error::Generic(
+                    "missing confirmation_time in confirmed spend transaction details".to_string(),
+                )
+            })?;
+            Ok(Some(ConfirmedSpendTransaction {
+                tx_id,
+                confirmation_time,
+                inputs,
+                outputs,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     #[instrument(name = "bdk.transactions.mark_as_synced", skip(self))]

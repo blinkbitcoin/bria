@@ -27,17 +27,31 @@ impl Utxos {
         let batches = utxos.chunks(BATCH_SIZE);
 
         for batch in batches {
+            let serialized_batch = batch
+                .iter()
+                .map(|utxo| {
+                    Ok::<_, bdk::Error>((
+                        utxo.outpoint.txid.to_string(),
+                        utxo.outpoint.vout as i32,
+                        serde_json::to_value(utxo).map_err(|e| {
+                            bdk::Error::Generic(format!("failed to serialize utxo: {e}"))
+                        })?,
+                        utxo.is_spent,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"INSERT INTO bdk_utxos
             (keychain_id, tx_id, vout, utxo_json, is_spent)"#,
             );
 
-            query_builder.push_values(batch, |mut builder, utxo| {
+            query_builder.push_values(serialized_batch, |mut builder, utxo| {
                 builder.push_bind(Uuid::from(self.keychain_id));
-                builder.push_bind(utxo.outpoint.txid.to_string());
-                builder.push_bind(utxo.outpoint.vout as i32);
-                builder.push_bind(serde_json::to_value(utxo).unwrap());
-                builder.push_bind(utxo.is_spent);
+                builder.push_bind(utxo.0);
+                builder.push_bind(utxo.1);
+                builder.push_bind(utxo.2);
+                builder.push_bind(utxo.3);
             });
 
             query_builder.push(
@@ -78,9 +92,11 @@ impl Utxos {
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-        Ok(row.map(|row| {
-            serde_json::from_value::<LocalUtxo>(row.utxo_json).expect("Could not deserialize utxo")
-        }))
+        row.map(|row| {
+            serde_json::from_value::<LocalUtxo>(row.utxo_json)
+                .map_err(|e| bdk::Error::Generic(format!("could not deserialize utxo: {e}")))
+        })
+        .transpose()
     }
 
     #[instrument(name = "bdk.utxos.undelete", skip_all)]
@@ -116,9 +132,11 @@ impl Utxos {
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-        Ok(utxo.map(|utxo| {
-            serde_json::from_value(utxo.utxo_json).expect("Could not deserialize utxo")
-        }))
+        utxo.map(|utxo| {
+            serde_json::from_value(utxo.utxo_json)
+                .map_err(|e| bdk::Error::Generic(format!("could not deserialize utxo: {e}")))
+        })
+        .transpose()
     }
 
     #[instrument(name = "bdk.utxos.list_local_utxos", skip_all)]
@@ -130,10 +148,13 @@ impl Utxos {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        Ok(utxos
+        utxos
             .into_iter()
-            .map(|utxo| serde_json::from_value(utxo.utxo_json).expect("Could not deserialize utxo"))
-            .collect())
+            .map(|utxo| {
+                serde_json::from_value(utxo.utxo_json)
+                    .map_err(|e| bdk::Error::Generic(format!("could not deserialize utxo: {e}")))
+            })
+            .collect()
     }
 
     #[instrument(name = "bdk.utxos.mark_as_synced", skip(self, tx))]
@@ -206,19 +227,22 @@ impl Utxos {
         .fetch_optional(&mut **tx)
         .await?;
 
-        Ok(row.map(|row| {
-            let local_utxo = serde_json::from_value::<LocalUtxo>(row.utxo_json)
-                .expect("Could not deserialize utxo");
-            let tx_details = serde_json::from_value::<TransactionDetails>(row.details_json)
-                .expect("Could not deserialize tx details");
-            ConfirmedIncomeUtxo {
+        if let Some(row) = row {
+            let local_utxo = serde_json::from_value::<LocalUtxo>(row.utxo_json)?;
+            let tx_details = serde_json::from_value::<TransactionDetails>(row.details_json)?;
+            let confirmation_time = tx_details.confirmation_time.ok_or_else(|| {
+                bdk::Error::Generic(
+                    "missing confirmation_time in confirmed income transaction details".to_string(),
+                )
+            })?;
+            Ok(Some(ConfirmedIncomeUtxo {
                 outpoint: local_utxo.outpoint,
                 spent: local_utxo.is_spent,
-                confirmation_time: tx_details
-                    .confirmation_time
-                    .expect("query should always return confirmation_time"),
-            }
-        }))
+                confirmation_time,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     #[instrument(name = "bdk.utxos.find_and_remove_soft_deleted_utxo", skip_all)]
@@ -238,11 +262,12 @@ impl Utxos {
         )
         .fetch_optional(&mut **tx)
         .await?;
-        Ok(row.map(|row| {
-            let local_utxo = serde_json::from_value::<LocalUtxo>(row.utxo_json)
-                .expect("Could not deserialize the utxo");
+        if let Some(row) = row {
+            let local_utxo = serde_json::from_value::<LocalUtxo>(row.utxo_json)?;
             let keychain_id = KeychainId::from(row.keychain_id);
-            (local_utxo.outpoint, keychain_id)
-        }))
+            Ok(Some((local_utxo.outpoint, keychain_id)))
+        } else {
+            Ok(None)
+        }
     }
 }

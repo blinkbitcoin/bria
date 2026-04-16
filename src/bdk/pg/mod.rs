@@ -239,7 +239,9 @@ impl BatchOperations for SqlxWalletDb {
     }
 
     fn set_raw_tx(&mut self, _: &Transaction) -> Result<(), bdk::Error> {
-        unimplemented!()
+        Err(bdk::Error::Generic(
+            "set_raw_tx is not supported by SqlxWalletDb".to_string(),
+        ))
     }
 
     fn set_tx(&mut self, tx: &TransactionDetails) -> Result<(), bdk::Error> {
@@ -264,13 +266,17 @@ impl BatchOperations for SqlxWalletDb {
         _: KeychainKind,
         _: u32,
     ) -> Result<Option<ScriptBuf>, bdk::Error> {
-        unimplemented!()
+        Err(bdk::Error::Generic(
+            "del_script_pubkey_from_path is not supported by SqlxWalletDb".to_string(),
+        ))
     }
     fn del_path_from_script_pubkey(
         &mut self,
         _: &Script,
     ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
-        unimplemented!()
+        Err(bdk::Error::Generic(
+            "del_path_from_script_pubkey is not supported by SqlxWalletDb".to_string(),
+        ))
     }
     fn del_utxo(&mut self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
         self.ctx
@@ -278,7 +284,9 @@ impl BatchOperations for SqlxWalletDb {
             .block_on(async { self.utxos_repo().delete(outpoint).await })
     }
     fn del_raw_tx(&mut self, _: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        unimplemented!()
+        Err(bdk::Error::Generic(
+            "del_raw_tx is not supported by SqlxWalletDb".to_string(),
+        ))
     }
 
     fn del_tx(
@@ -299,10 +307,14 @@ impl BatchOperations for SqlxWalletDb {
         Ok(deleted)
     }
     fn del_last_index(&mut self, _: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
-        unimplemented!()
+        Err(bdk::Error::Generic(
+            "del_last_index is not supported by SqlxWalletDb".to_string(),
+        ))
     }
     fn del_sync_time(&mut self) -> Result<Option<SyncTime>, bdk::Error> {
-        unimplemented!()
+        Err(bdk::Error::Generic(
+            "del_sync_time is not supported by SqlxWalletDb".to_string(),
+        ))
     }
 }
 
@@ -338,15 +350,32 @@ impl Database for SqlxWalletDb {
             .block_on(async { self.utxos_repo().list_local_utxos().await })
     }
     fn iter_raw_txs(&self) -> Result<Vec<Transaction>, bdk::Error> {
-        unimplemented!()
+        Err(bdk::Error::Generic(
+            "iter_raw_txs is not supported by SqlxWalletDb".to_string(),
+        ))
     }
 
-    fn iter_txs(&self, _: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
-        let mut txs = self
-            .ctx
-            .rt
-            .block_on(async { self.transactions_repo().load_all().await })?;
-        txs.extend(self.batch.txs.iter().map(|(id, tx)| (*id, tx.clone())));
+    fn iter_txs(&self, include_raw: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
+        let mut txs = if include_raw {
+            self.ctx
+                .rt
+                .block_on(async { self.transactions_repo().load_all().await })?
+        } else {
+            self.ctx
+                .rt
+                .block_on(async { self.transactions_repo().load_all_summaries().await })?
+        };
+
+        if include_raw {
+            txs.extend(self.batch.txs.iter().map(|(id, tx)| (*id, tx.clone())));
+        } else {
+            txs.extend(self.batch.txs.iter().map(|(id, tx)| {
+                let mut tx = tx.clone();
+                tx.transaction = None;
+                (*id, tx)
+            }));
+        }
+
         Ok(txs.into_values().collect())
     }
 
@@ -371,8 +400,29 @@ impl Database for SqlxWalletDb {
             .block_on(async { self.utxos_repo().find(outpoint).await })
     }
     fn get_raw_tx(&self, tx_id: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        self.lookup_tx(tx_id)
-            .map(|tx| tx.and_then(|tx| tx.transaction))
+        if let Some(tx) = self.batch.txs.get(tx_id) {
+            if let Some(transaction) = &tx.transaction {
+                return Ok(Some(transaction.clone()));
+            }
+        }
+
+        if let Some(tx) = self.cache.get_tx(tx_id)? {
+            if let Some(transaction) = tx.transaction {
+                return Ok(Some(transaction));
+            }
+        }
+
+        let found = self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().find_by_id(tx_id).await })?;
+
+        if let Some(tx) = found {
+            self.cache.insert_tx(tx.txid, tx.clone())?;
+            Ok(tx.transaction)
+        } else {
+            Ok(None)
+        }
     }
     fn get_tx(
         &self,
