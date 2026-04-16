@@ -65,6 +65,8 @@ struct WalletBatchState {
 struct WalletCache {
     script_pubkeys: Arc<Mutex<ScriptPubkeyCache>>,
     transactions: Arc<Mutex<TransactionCache>>,
+    // Process-local hint: true means this instance has already hydrated raw tx details
+    // from the DB at least once. It is intentionally not synchronized across processes.
     raw_txs_fully_loaded: Arc<AtomicBool>,
 }
 
@@ -467,9 +469,16 @@ impl Database for SqlxWalletDb {
     fn get_tx(
         &self,
         tx_id: &Txid,
-        _include_raw: bool,
+        include_raw: bool,
     ) -> Result<Option<TransactionDetails>, bdk::Error> {
-        self.lookup_tx(tx_id)
+        self.lookup_tx(tx_id).map(|tx| {
+            tx.map(|mut tx| {
+                if !include_raw {
+                    tx.transaction = None;
+                }
+                tx
+            })
+        })
     }
     fn get_last_index(&self, kind: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
         self.ctx
@@ -503,6 +512,8 @@ impl BatchDatabase for SqlxWalletDb {
         &mut self,
         mut batch: <Self as BatchDatabase>::Batch,
     ) -> Result<(), bdk::Error> {
+        // Atomic scope here is limited to staged script pubkeys, utxos, and transactions.
+        // `set_last_index` / `set_sync_time` remain immediate writes by design.
         let (addresses_for_cache, addresses_for_db): (Vec<_>, Vec<_>) = batch
             .batch
             .addresses
