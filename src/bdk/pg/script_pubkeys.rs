@@ -1,6 +1,8 @@
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use tracing::instrument;
 use uuid::Uuid;
+
+use std::collections::HashMap;
 
 use super::convert::BdkKeychainKind;
 use crate::primitives::{bitcoin::ScriptBuf, *};
@@ -141,6 +143,43 @@ impl ScriptPubkeys {
                 })
         })
         .transpose()
+    }
+
+    #[instrument(name = "bdk.script_pubkeys.find_paths_for_scripts", skip_all, fields(n_requested = scripts.len(), n_found))]
+    pub async fn find_paths_for_scripts(
+        &self,
+        scripts: &[ScriptBuf],
+    ) -> Result<HashMap<ScriptBuf, (BdkKeychainKind, u32)>, bdk::Error> {
+        if scripts.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let script_hexes: Vec<String> = scripts
+            .iter()
+            .map(|script| format!("{script:02x}"))
+            .collect();
+        let rows = sqlx::query(
+            r#"SELECT script, keychain_kind, path
+            FROM bdk_script_pubkeys
+            WHERE keychain_id = $1 AND script_hex = ANY($2)"#,
+        )
+        .bind(Uuid::from(self.keychain_id))
+        .bind(&script_hexes)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+        tracing::Span::current().record("n_found", rows.len());
+
+        rows.into_iter()
+            .map(|row| {
+                let keychain_kind_raw: BdkKeychainKind = row.get("keychain_kind");
+                let path: i32 = row.get("path");
+                let script: Vec<u8> = row.get("script");
+                let (script, (_, path)) = Self::script_with_path(script, keychain_kind_raw, path)?;
+                Ok((script, (keychain_kind_raw, path)))
+            })
+            .collect()
     }
 
     #[instrument(name = "bdk.script_pubkeys.list_scripts", skip_all)]

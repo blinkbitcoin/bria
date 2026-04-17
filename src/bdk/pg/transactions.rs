@@ -1,5 +1,5 @@
 use bdk::{bitcoin::Txid, BlockTime, LocalUtxo, TransactionDetails};
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction as SqlxTransaction};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction as SqlxTransaction};
 use tracing::instrument;
 
 use std::collections::HashMap;
@@ -33,6 +33,19 @@ pub struct Transactions {
 }
 
 impl Transactions {
+    fn parse_txid(tx_id: &str) -> Result<Txid, bdk::Error> {
+        tx_id
+            .parse::<Txid>()
+            .map_err(|e| bdk::Error::Generic(format!("invalid tx_id in db: {e}")))
+    }
+
+    fn deserialize_details(
+        details_json: serde_json::Value,
+    ) -> Result<TransactionDetails, bdk::Error> {
+        serde_json::from_value::<TransactionDetails>(details_json)
+            .map_err(|e| bdk::Error::Generic(format!("could not deserialize tx details: {e}")))
+    }
+
     fn serialize_batch(
         batch: &[TransactionDetails],
     ) -> Result<Vec<SerializedTransactionRow>, bdk::Error> {
@@ -188,11 +201,45 @@ impl Transactions {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        tx.map(|tx| {
-            serde_json::from_value(tx.details_json)
-                .map_err(|e| bdk::Error::Generic(format!("could not deserialize tx details: {e}")))
-        })
-        .transpose()
+        tx.map(|tx| Self::deserialize_details(tx.details_json))
+            .transpose()
+    }
+
+    #[instrument(name = "bdk.transactions.find_by_ids", skip_all, fields(n_requested = tx_ids.len(), n_found))]
+    pub async fn find_by_ids(
+        &self,
+        tx_ids: &[Txid],
+    ) -> Result<HashMap<Txid, TransactionDetails>, bdk::Error> {
+        if tx_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let tx_ids_text: Vec<String> = tx_ids.iter().map(ToString::to_string).collect();
+        let rows = sqlx::query(
+            r#"
+        SELECT tx_id, details_json
+          FROM bdk_transactions
+         WHERE keychain_id = $1
+           AND deleted_at IS NULL
+           AND tx_id = ANY($2)"#,
+        )
+        .bind(self.keychain_id as KeychainId)
+        .bind(&tx_ids_text)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+        tracing::Span::current().record("n_found", rows.len());
+
+        rows.into_iter()
+            .map(|row| {
+                let tx_id: String = row.get("tx_id");
+                let txid = Self::parse_txid(&tx_id)?;
+                let details_json: serde_json::Value = row.get("details_json");
+                let tx = Self::deserialize_details(details_json)?;
+                Ok((txid, tx))
+            })
+            .collect()
     }
 
     #[instrument(name = "bdk.transactions.load_all", skip(self), fields(n_rows))]
@@ -207,13 +254,7 @@ impl Transactions {
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
         tracing::Span::current().record("n_rows", txs.len());
         txs.into_iter()
-            .map(|tx| {
-                serde_json::from_value::<TransactionDetails>(tx.details_json)
-                    .map(|tx| (tx.txid, tx))
-                    .map_err(|e| {
-                        bdk::Error::Generic(format!("could not deserialize tx details: {e}"))
-                    })
-            })
+            .map(|tx| Self::deserialize_details(tx.details_json).map(|tx| (tx.txid, tx)))
             .collect()
     }
 

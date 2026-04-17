@@ -1,4 +1,5 @@
 mod convert;
+mod db_traits;
 mod descriptor_checksum;
 mod index;
 mod script_pubkeys;
@@ -7,21 +8,19 @@ mod transactions;
 mod utxos;
 
 use bdk::{
-    bitcoin::{blockdata::transaction::OutPoint, Script, ScriptBuf, Transaction, Txid},
-    database::{BatchDatabase, BatchOperations, Database, SyncTime},
+    bitcoin::{Script, ScriptBuf, Txid},
     KeychainKind, LocalUtxo, TransactionDetails,
 };
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
 use crate::primitives::*;
-use convert::BdkKeychainKind;
 use descriptor_checksum::DescriptorChecksums;
 use index::Indexes;
 use script_pubkeys::ScriptPubkeys;
 use std::{
-    collections::HashMap,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+    collections::{HashMap, HashSet},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     sync::{Arc, Mutex, MutexGuard},
 };
 pub(super) use sync_times::SyncTimes;
@@ -65,6 +64,10 @@ struct WalletBatchState {
 struct WalletCache {
     script_pubkeys: Arc<Mutex<ScriptPubkeyCache>>,
     transactions: Arc<Mutex<TransactionCache>>,
+    missing_script_pubkeys: Arc<Mutex<HashSet<ScriptBuf>>>,
+    missing_txids: Arc<Mutex<HashSet<Txid>>>,
+    pending_script_misses: Arc<Mutex<HashSet<ScriptBuf>>>,
+    pending_tx_misses: Arc<Mutex<HashSet<Txid>>>,
     // Process-local hint for which keychain script path sets are fully hydrated.
     // Bit 0: external, bit 1: internal.
     // This is intentionally not synchronized across processes.
@@ -72,6 +75,10 @@ struct WalletCache {
     // Process-local hint: true means this instance has already hydrated raw tx details
     // from the DB at least once. It is intentionally not synchronized across processes.
     raw_txs_fully_loaded: Arc<AtomicBool>,
+    // Process-local hint: true means summary tx details were fully hydrated once.
+    summary_txs_fully_loaded: Arc<AtomicBool>,
+    raw_tx_lookup_miss_count: Arc<AtomicUsize>,
+    script_lookup_miss_count: Arc<AtomicUsize>,
 }
 
 impl WalletCache {
@@ -79,8 +86,15 @@ impl WalletCache {
         Self {
             script_pubkeys: Arc::new(Mutex::new(HashMap::new())),
             transactions: Arc::new(Mutex::new(HashMap::new())),
+            missing_script_pubkeys: Arc::new(Mutex::new(HashSet::new())),
+            missing_txids: Arc::new(Mutex::new(HashSet::new())),
+            pending_script_misses: Arc::new(Mutex::new(HashSet::new())),
+            pending_tx_misses: Arc::new(Mutex::new(HashSet::new())),
             script_pubkeys_loaded_mask: Arc::new(AtomicU8::new(0)),
             raw_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
+            summary_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
+            raw_tx_lookup_miss_count: Arc::new(AtomicUsize::new(0)),
+            script_lookup_miss_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -106,6 +120,32 @@ impl WalletCache {
             .map_err(|_| bdk::Error::Generic("transactions cache lock poisoned".to_string()))
     }
 
+    fn lock_missing_script_pubkeys(
+        &self,
+    ) -> Result<MutexGuard<'_, HashSet<ScriptBuf>>, bdk::Error> {
+        self.missing_script_pubkeys.lock().map_err(|_| {
+            bdk::Error::Generic("missing script pubkeys cache lock poisoned".to_string())
+        })
+    }
+
+    fn lock_missing_txids(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
+        self.missing_txids
+            .lock()
+            .map_err(|_| bdk::Error::Generic("missing txids cache lock poisoned".to_string()))
+    }
+
+    fn lock_pending_script_misses(&self) -> Result<MutexGuard<'_, HashSet<ScriptBuf>>, bdk::Error> {
+        self.pending_script_misses.lock().map_err(|_| {
+            bdk::Error::Generic("pending script misses cache lock poisoned".to_string())
+        })
+    }
+
+    fn lock_pending_tx_misses(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
+        self.pending_tx_misses
+            .lock()
+            .map_err(|_| bdk::Error::Generic("pending tx misses cache lock poisoned".to_string()))
+    }
+
     fn get_script_pubkey_path(
         &self,
         script: &Script,
@@ -119,8 +159,24 @@ impl WalletCache {
         script: ScriptBuf,
         path: (KeychainKind, u32),
     ) -> Result<(), bdk::Error> {
-        let mut cache = self.lock_script_pubkeys()?;
-        cache.insert(script, path);
+        {
+            let mut cache = self.lock_script_pubkeys()?;
+            cache.insert(script.clone(), path);
+        }
+        self.mark_script_not_missing(&script)?;
+        Ok(())
+    }
+
+    fn clear_script_miss_tracking<'a, I>(&self, scripts: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = &'a ScriptBuf>,
+    {
+        let mut missing = self.lock_missing_script_pubkeys()?;
+        let mut pending = self.lock_pending_script_misses()?;
+        for script in scripts {
+            missing.remove(script.as_script());
+            pending.remove(script);
+        }
         Ok(())
     }
 
@@ -128,6 +184,8 @@ impl WalletCache {
     where
         I: IntoIterator<Item = (ScriptBuf, (KeychainKind, u32))>,
     {
+        let entries: Vec<_> = entries.into_iter().collect();
+        self.clear_script_miss_tracking(entries.iter().map(|(script, _)| script))?;
         let mut cache = self.lock_script_pubkeys()?;
         cache.extend(entries);
         Ok(())
@@ -163,8 +221,24 @@ impl WalletCache {
     }
 
     fn insert_tx(&self, txid: Txid, tx: TransactionDetails) -> Result<(), bdk::Error> {
-        let mut cache = self.lock_transactions()?;
-        cache.insert(txid, tx);
+        {
+            let mut cache = self.lock_transactions()?;
+            cache.insert(txid, tx);
+        }
+        self.mark_txid_not_missing(&txid)?;
+        Ok(())
+    }
+
+    fn clear_tx_miss_tracking<'a, I>(&self, txids: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = &'a Txid>,
+    {
+        let mut missing = self.lock_missing_txids()?;
+        let mut pending = self.lock_pending_tx_misses()?;
+        for txid in txids {
+            missing.remove(txid);
+            pending.remove(txid);
+        }
         Ok(())
     }
 
@@ -172,6 +246,8 @@ impl WalletCache {
     where
         I: IntoIterator<Item = (Txid, TransactionDetails)>,
     {
+        let entries: Vec<_> = entries.into_iter().collect();
+        self.clear_tx_miss_tracking(entries.iter().map(|(txid, _)| txid))?;
         let mut cache = self.lock_transactions()?;
         cache.extend(entries);
         Ok(())
@@ -217,12 +293,94 @@ impl WalletCache {
 
     fn set_raw_txs_fully_loaded(&self) {
         self.raw_txs_fully_loaded.store(true, Ordering::Release);
+        self.summary_txs_fully_loaded.store(true, Ordering::Release);
+    }
+
+    fn summary_txs_fully_loaded(&self) -> bool {
+        self.summary_txs_fully_loaded.load(Ordering::Acquire)
+    }
+
+    fn set_summary_txs_fully_loaded(&self) {
+        self.summary_txs_fully_loaded.store(true, Ordering::Release);
     }
 
     fn remove_tx(&self, txid: &Txid) -> Result<(), bdk::Error> {
-        let mut cache = self.lock_transactions()?;
-        cache.remove(txid);
+        {
+            let mut cache = self.lock_transactions()?;
+            cache.remove(txid);
+        }
+        self.mark_txid_missing(*txid)?;
         Ok(())
+    }
+
+    fn script_marked_missing(&self, script: &Script) -> Result<bool, bdk::Error> {
+        let missing = self.lock_missing_script_pubkeys()?;
+        Ok(missing.contains(script))
+    }
+
+    fn mark_script_missing(&self, script: ScriptBuf) -> Result<(), bdk::Error> {
+        self.lock_missing_script_pubkeys()?.insert(script.clone());
+        self.lock_pending_script_misses()?.insert(script);
+        self.script_lookup_miss_count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn mark_script_not_missing(&self, script: &Script) -> Result<(), bdk::Error> {
+        self.lock_missing_script_pubkeys()?.remove(script);
+        self.lock_pending_script_misses()?.remove(script);
+        Ok(())
+    }
+
+    fn drain_pending_script_misses(&self, max: usize) -> Result<Vec<ScriptBuf>, bdk::Error> {
+        let mut pending = self.lock_pending_script_misses()?;
+        let drained: Vec<_> = pending.iter().take(max).cloned().collect();
+        for script in &drained {
+            pending.remove(script);
+        }
+        Ok(drained)
+    }
+
+    fn txid_marked_missing(&self, txid: &Txid) -> Result<bool, bdk::Error> {
+        let missing = self.lock_missing_txids()?;
+        Ok(missing.contains(txid))
+    }
+
+    fn mark_txid_missing(&self, txid: Txid) -> Result<(), bdk::Error> {
+        self.lock_missing_txids()?.insert(txid);
+        self.lock_pending_tx_misses()?.insert(txid);
+        self.raw_tx_lookup_miss_count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn mark_txid_not_missing(&self, txid: &Txid) -> Result<(), bdk::Error> {
+        self.lock_missing_txids()?.remove(txid);
+        self.lock_pending_tx_misses()?.remove(txid);
+        Ok(())
+    }
+
+    fn drain_pending_tx_misses(&self, max: usize) -> Result<Vec<Txid>, bdk::Error> {
+        let mut pending = self.lock_pending_tx_misses()?;
+        let drained: Vec<_> = pending.iter().take(max).copied().collect();
+        for txid in &drained {
+            pending.remove(txid);
+        }
+        Ok(drained)
+    }
+
+    fn should_batch_resolve_script_misses(&self, threshold: usize) -> bool {
+        self.script_lookup_miss_count.load(Ordering::Acquire) >= threshold
+    }
+
+    fn should_batch_resolve_tx_misses(&self, threshold: usize) -> bool {
+        self.raw_tx_lookup_miss_count.load(Ordering::Acquire) >= threshold
+    }
+
+    fn reset_script_miss_counter(&self) {
+        self.script_lookup_miss_count.store(0, Ordering::Release);
+    }
+
+    fn reset_tx_miss_counter(&self) {
+        self.raw_tx_lookup_miss_count.store(0, Ordering::Release);
     }
 }
 
@@ -233,6 +391,9 @@ pub struct SqlxWalletDb {
 }
 
 impl SqlxWalletDb {
+    const MISS_BATCH_THRESHOLD: usize = 64;
+    const MISS_BATCH_SIZE: usize = 512;
+
     fn unsupported_operation(operation: &str) -> bdk::Error {
         bdk::Error::Generic(format!("{operation} is not supported by SqlxWalletDb"))
     }
@@ -287,21 +448,91 @@ impl SqlxWalletDb {
         DescriptorChecksums::new(self.ctx.keychain_id, self.ctx.pool.clone())
     }
 
+    fn resolve_pending_script_misses(&self) -> Result<(), bdk::Error> {
+        if !self
+            .cache
+            .should_batch_resolve_script_misses(Self::MISS_BATCH_THRESHOLD)
+        {
+            return Ok(());
+        }
+
+        let pending = self
+            .cache
+            .drain_pending_script_misses(Self::MISS_BATCH_SIZE)?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let found = self.ctx.rt.block_on(async {
+            self.script_pubkeys_repo()
+                .find_paths_for_scripts(&pending)
+                .await
+        })?;
+
+        if !found.is_empty() {
+            self.cache.extend_script_pubkeys(
+                found
+                    .into_iter()
+                    .map(|(script, (kind, path))| (script, (KeychainKind::from(kind), path))),
+            )?;
+        }
+
+        self.cache.reset_script_miss_counter();
+        Ok(())
+    }
+
+    fn resolve_pending_tx_misses(&self) -> Result<(), bdk::Error> {
+        if !self
+            .cache
+            .should_batch_resolve_tx_misses(Self::MISS_BATCH_THRESHOLD)
+        {
+            return Ok(());
+        }
+
+        let pending = self.cache.drain_pending_tx_misses(Self::MISS_BATCH_SIZE)?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let found = self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().find_by_ids(&pending).await })?;
+
+        if !found.is_empty() {
+            self.cache.extend_txs(found)?;
+        }
+
+        self.cache.reset_tx_miss_counter();
+        Ok(())
+    }
+
     fn lookup_script_pubkey_path(
         &self,
         script: &Script,
-    ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
+    ) -> Result<(Option<(KeychainKind, u32)>, &'static str), bdk::Error> {
         if let Some(path) = self.batch.addresses.get(script) {
-            return Ok(Some(*path));
+            return Ok((Some(*path), "batch"));
         }
 
         if let Some(path) = self.cache.get_script_pubkey_path(script)? {
-            return Ok(Some(path));
+            return Ok((Some(path), "cache"));
+        }
+
+        if self.cache.script_marked_missing(script)? {
+            tracing::trace!("script path miss cache hit");
+            return Ok((None, "miss_cache"));
         }
 
         // Once both keychains are fully hydrated in this process, a cache miss is definitive.
         if self.cache.script_pubkeys_fully_loaded(None) {
-            return Ok(None);
+            self.cache.mark_script_missing(script.to_owned())?;
+            return Ok((None, "fully_loaded_miss"));
+        }
+
+        self.resolve_pending_script_misses()?;
+        if let Some(path) = self.cache.get_script_pubkey_path(script)? {
+            return Ok((Some(path), "batch_resolve"));
         }
 
         let script_pubkey = script.to_owned();
@@ -313,38 +544,57 @@ impl SqlxWalletDb {
         if let Some((kind, path)) = found {
             let value = (KeychainKind::from(kind), path);
             self.cache.insert_script_pubkey(script_pubkey, value)?;
-            return Ok(Some(value));
+            return Ok((Some(value), "db_hit"));
         }
 
-        Ok(None)
+        self.cache.mark_script_missing(script_pubkey)?;
+
+        Ok((None, "db_miss"))
     }
 
     fn lookup_tx_with_mode(
         &self,
         txid: &Txid,
         mode: TxLookupMode,
-    ) -> Result<Option<TransactionDetails>, bdk::Error> {
+    ) -> Result<(Option<TransactionDetails>, &'static str), bdk::Error> {
         if let Some(tx) = self.batch.txs.get(txid) {
             if Self::tx_matches_lookup_mode(tx, mode) {
-                return Ok(Some(tx.clone()));
+                return Ok((Some(tx.clone()), "batch"));
             }
 
-            return Ok(None);
+            return Ok((None, "batch_mode_miss"));
         }
 
         if let Some(tx) = self.cache.get_tx(txid)? {
             if Self::tx_matches_lookup_mode(&tx, mode) {
-                return Ok(Some(tx));
+                return Ok((Some(tx), "cache"));
             }
 
             if self.cache.raw_txs_fully_loaded() {
-                return Ok(None);
+                return Ok((None, "cache_mode_miss"));
             }
+        }
+
+        if self.cache.txid_marked_missing(txid)? {
+            tracing::trace!("tx miss cache hit");
+            return Ok((None, "miss_cache"));
         }
 
         // Once raw txs are fully loaded in this process, a miss is definitive.
         if self.cache.raw_txs_fully_loaded() {
-            return Ok(None);
+            self.cache.mark_txid_missing(*txid)?;
+            return Ok((None, "fully_loaded_miss"));
+        }
+
+        self.resolve_pending_tx_misses()?;
+        if let Some(tx) = self.cache.get_tx(txid)? {
+            if Self::tx_matches_lookup_mode(&tx, mode) {
+                return Ok((Some(tx), "batch_resolve"));
+            }
+            if self.cache.raw_txs_fully_loaded() {
+                self.cache.mark_txid_missing(*txid)?;
+                return Ok((None, "batch_resolve_mode_miss"));
+            }
         }
 
         let found = self
@@ -358,12 +608,17 @@ impl SqlxWalletDb {
 
         if let Some(tx) = &found {
             self.cache.insert_tx(tx.txid, tx.clone())?;
+            return Ok((found, "db_hit"));
+        } else {
+            self.cache.mark_txid_missing(*txid)?;
+            return Ok((None, "db_miss"));
         }
-
-        Ok(found)
     }
 
-    fn lookup_tx(&self, txid: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
+    fn lookup_tx(
+        &self,
+        txid: &Txid,
+    ) -> Result<(Option<TransactionDetails>, &'static str), bdk::Error> {
         self.lookup_tx_with_mode(txid, TxLookupMode::Any)
     }
 
@@ -421,348 +676,6 @@ impl SqlxWalletDb {
     }
 }
 
-impl BatchOperations for SqlxWalletDb {
-    #[tracing::instrument(name = "bdk.batch.set_script_pubkey", skip_all, err)]
-    fn set_script_pubkey(
-        &mut self,
-        script: &Script,
-        keychain: KeychainKind,
-        path: u32,
-    ) -> Result<(), bdk::Error> {
-        self.batch.addresses.insert(script.into(), (keychain, path));
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "bdk.batch.set_utxo", skip_all, err)]
-    fn set_utxo(&mut self, utxo: &LocalUtxo) -> Result<(), bdk::Error> {
-        self.batch.utxos.push(utxo.clone());
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "bdk.batch.set_raw_tx", skip_all, err)]
-    fn set_raw_tx(&mut self, _: &Transaction) -> Result<(), bdk::Error> {
-        Err(Self::unsupported_operation("set_raw_tx"))
-    }
-
-    #[tracing::instrument(name = "bdk.batch.set_tx", skip_all, err)]
-    fn set_tx(&mut self, tx: &TransactionDetails) -> Result<(), bdk::Error> {
-        self.batch.txs.insert(tx.txid, tx.clone());
-        Ok(())
-    }
-
-    #[tracing::instrument(name = "bdk.batch.set_last_index", skip_all, err)]
-    fn set_last_index(&mut self, kind: KeychainKind, idx: u32) -> Result<(), bdk::Error> {
-        // NOTE: This write is intentionally immediate because BDK may call it outside of
-        // `commit_batch` flow.
-        self.ctx
-            .rt
-            .block_on(async { self.indexes_repo().persist_last_index(kind, idx).await })
-    }
-
-    #[tracing::instrument(name = "bdk.batch.set_sync_time", skip_all, err)]
-    fn set_sync_time(&mut self, time: SyncTime) -> Result<(), bdk::Error> {
-        // NOTE: This write is intentionally immediate because BDK may call it outside of
-        // `commit_batch` flow.
-        self.ctx
-            .rt
-            .block_on(async { self.sync_times_repo().persist(time).await })
-    }
-
-    #[tracing::instrument(name = "bdk.batch.del_script_pubkey_from_path", skip_all, err)]
-    fn del_script_pubkey_from_path(
-        &mut self,
-        _: KeychainKind,
-        _: u32,
-    ) -> Result<Option<ScriptBuf>, bdk::Error> {
-        Err(Self::unsupported_operation("del_script_pubkey_from_path"))
-    }
-
-    #[tracing::instrument(name = "bdk.batch.del_path_from_script_pubkey", skip_all, err)]
-    fn del_path_from_script_pubkey(
-        &mut self,
-        _: &Script,
-    ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
-        Err(Self::unsupported_operation("del_path_from_script_pubkey"))
-    }
-
-    #[tracing::instrument(name = "bdk.batch.del_utxo", skip_all, err)]
-    fn del_utxo(&mut self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
-        self.ctx
-            .rt
-            .block_on(async { self.utxos_repo().delete(outpoint).await })
-    }
-
-    #[tracing::instrument(name = "bdk.batch.del_raw_tx", skip_all, err)]
-    fn del_raw_tx(&mut self, _: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        Err(Self::unsupported_operation("del_raw_tx"))
-    }
-
-    #[tracing::instrument(name = "bdk.batch.del_tx", skip_all, err)]
-    fn del_tx(
-        &mut self,
-        tx_id: &Txid,
-        _include_raw: bool,
-    ) -> Result<Option<TransactionDetails>, bdk::Error> {
-        let deleted = self
-            .ctx
-            .rt
-            .block_on(async { self.transactions_repo().delete(tx_id).await })?;
-
-        if deleted.is_some() {
-            self.batch.txs.remove(tx_id);
-            self.cache.remove_tx(tx_id)?;
-        }
-
-        Ok(deleted)
-    }
-
-    #[tracing::instrument(name = "bdk.batch.del_last_index", skip_all, err)]
-    fn del_last_index(&mut self, _: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
-        Err(Self::unsupported_operation("del_last_index"))
-    }
-
-    #[tracing::instrument(name = "bdk.batch.del_sync_time", skip_all, err)]
-    fn del_sync_time(&mut self) -> Result<Option<SyncTime>, bdk::Error> {
-        Err(Self::unsupported_operation("del_sync_time"))
-    }
-}
-
-impl Database for SqlxWalletDb {
-    #[tracing::instrument(name = "bdk.db.check_descriptor_checksum", skip_all, err)]
-    fn check_descriptor_checksum<B>(
-        &mut self,
-        keychain: KeychainKind,
-        script_bytes: B,
-    ) -> Result<(), bdk::Error>
-    where
-        B: AsRef<[u8]>,
-    {
-        self.ctx.rt.block_on(async {
-            let checksums = self.descriptor_checksums_repo();
-            checksums
-                .check_or_persist_descriptor_checksum(keychain, script_bytes.as_ref())
-                .await?;
-
-            Ok(())
-        })
-    }
-
-    #[tracing::instrument(name = "bdk.db.iter_script_pubkeys", skip_all, err)]
-    fn iter_script_pubkeys(
-        &self,
-        keychain: Option<KeychainKind>,
-    ) -> Result<Vec<ScriptBuf>, bdk::Error> {
-        if self.cache.script_pubkeys_fully_loaded(keychain) {
-            return self.cache.all_script_pubkeys(keychain);
-        }
-
-        let scripts_with_paths = self.ctx.rt.block_on(async {
-            self.script_pubkeys_repo()
-                .list_scripts_with_paths(keychain)
-                .await
-        })?;
-
-        Self::cache_loaded_script_pubkeys(&self.cache, keychain, scripts_with_paths)
-    }
-
-    #[tracing::instrument(name = "bdk.db.iter_utxos", skip_all, err)]
-    fn iter_utxos(&self) -> Result<Vec<LocalUtxo>, bdk::Error> {
-        self.ctx
-            .rt
-            .block_on(async { self.utxos_repo().list_local_utxos().await })
-    }
-
-    #[tracing::instrument(name = "bdk.db.iter_raw_txs", skip_all, err)]
-    fn iter_raw_txs(&self) -> Result<Vec<Transaction>, bdk::Error> {
-        Err(Self::unsupported_operation("iter_raw_txs"))
-    }
-
-    #[tracing::instrument(name = "bdk.db.iter_txs", skip_all, err)]
-    fn iter_txs(&self, include_raw: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
-        let txs = match (include_raw, self.cache.raw_txs_fully_loaded()) {
-            (true, true) => self
-                .cache
-                .all_txs()?
-                .into_iter()
-                .map(|tx| (tx.txid, tx))
-                .collect(),
-            (true, false) => {
-                let loaded = self
-                    .ctx
-                    .rt
-                    .block_on(async { self.transactions_repo().load_all().await })?;
-                self.cache
-                    .extend_txs(loaded.iter().map(|(txid, tx)| (*txid, tx.clone())))?;
-                self.cache.set_raw_txs_fully_loaded();
-                loaded
-            }
-            // Once raw txs are fully loaded for this process, serve summary calls from cache to
-            // avoid repeated full-table reads. This returns the in-process snapshot (kept current
-            // by set/del/commit paths) rather than forcing a fresh DB roundtrip.
-            (false, true) => self.cache.all_summary_txs()?,
-            (false, false) => {
-                let txs = self
-                    .ctx
-                    .rt
-                    .block_on(async { self.transactions_repo().load_all_summaries().await })?;
-                self.cache
-                    .extend_summary_txs(txs.iter().map(|(txid, tx)| (*txid, tx.clone())))?;
-                txs
-            }
-        };
-
-        Ok(Self::overlay_batch_txs(txs, &self.batch.txs, include_raw)
-            .into_values()
-            .collect())
-    }
-
-    #[tracing::instrument(name = "bdk.db.get_script_pubkey_from_path", skip_all, err)]
-    fn get_script_pubkey_from_path(
-        &self,
-        keychain: KeychainKind,
-        path: u32,
-    ) -> Result<Option<ScriptBuf>, bdk::Error> {
-        self.ctx
-            .rt
-            .block_on(async { self.script_pubkeys_repo().find_script(keychain, path).await })
-    }
-
-    #[tracing::instrument(name = "bdk.db.get_path_from_script_pubkey", skip_all, err)]
-    fn get_path_from_script_pubkey(
-        &self,
-        script: &Script,
-    ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
-        self.lookup_script_pubkey_path(script)
-    }
-
-    #[tracing::instrument(name = "bdk.db.get_utxo", skip_all, err)]
-    fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
-        self.ctx
-            .rt
-            .block_on(async { self.utxos_repo().find(outpoint).await })
-    }
-
-    #[tracing::instrument(name = "bdk.db.get_raw_tx", skip_all, err)]
-    fn get_raw_tx(&self, tx_id: &Txid) -> Result<Option<Transaction>, bdk::Error> {
-        self.lookup_tx_with_mode(tx_id, TxLookupMode::RequireRaw)
-            .map(|tx| tx.and_then(|tx| tx.transaction))
-    }
-
-    #[tracing::instrument(name = "bdk.db.get_tx", skip_all, err)]
-    fn get_tx(
-        &self,
-        tx_id: &Txid,
-        include_raw: bool,
-    ) -> Result<Option<TransactionDetails>, bdk::Error> {
-        self.lookup_tx(tx_id).map(|tx| {
-            tx.map(|tx| {
-                if include_raw {
-                    tx
-                } else {
-                    Self::summary_tx_from_owned(tx)
-                }
-            })
-        })
-    }
-
-    #[tracing::instrument(name = "bdk.db.get_last_index", skip_all, err)]
-    fn get_last_index(&self, kind: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
-        self.ctx
-            .rt
-            .block_on(async { self.indexes_repo().get_latest(kind).await })
-    }
-
-    #[tracing::instrument(name = "bdk.db.get_sync_time", skip_all, err)]
-    fn get_sync_time(&self) -> Result<Option<SyncTime>, bdk::Error> {
-        self.ctx
-            .rt
-            .block_on(async { self.sync_times_repo().get().await })
-    }
-
-    #[tracing::instrument(name = "bdk.db.increment_last_index", skip_all, err)]
-    fn increment_last_index(&mut self, keychain: KeychainKind) -> Result<u32, bdk::Error> {
-        self.ctx
-            .rt
-            .block_on(async { self.indexes_repo().increment(keychain).await })
-    }
-}
-
-impl BatchDatabase for SqlxWalletDb {
-    type Batch = Self;
-
-    fn begin_batch(&self) -> <Self as BatchDatabase>::Batch {
-        SqlxWalletDb {
-            ctx: self.ctx.clone(),
-            cache: self.cache.clone(),
-            batch: WalletBatchState::default(),
-        }
-    }
-
-    fn commit_batch(
-        &mut self,
-        mut batch: <Self as BatchDatabase>::Batch,
-    ) -> Result<(), bdk::Error> {
-        // Atomic scope here is limited to staged script pubkeys, utxos, and transactions.
-        // `set_last_index` / `set_sync_time` remain immediate writes by design.
-        let (addresses_for_cache, addresses_for_db): (Vec<_>, Vec<_>) = batch
-            .batch
-            .addresses
-            .drain()
-            .map(|(script, (keychain, path))| {
-                let cache_entry = (script.clone(), (keychain, path));
-                let db_entry = (BdkKeychainKind::from(keychain), path, script);
-                (cache_entry, db_entry)
-            })
-            .unzip();
-
-        let (txs_for_cache, txs_for_db): (Vec<_>, Vec<_>) = batch
-            .batch
-            .txs
-            .drain()
-            .map(|(txid, tx)| ((txid, tx.clone()), tx))
-            .unzip();
-
-        let utxos_for_db = std::mem::take(&mut batch.batch.utxos);
-        let keychain_id = batch.ctx.keychain_id;
-        let pool = batch.ctx.pool.clone();
-
-        batch.ctx.rt.block_on(async move {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-
-            if !addresses_for_db.is_empty() {
-                ScriptPubkeys::new(keychain_id, pool.clone())
-                    .persist_all_in_tx(&mut tx, addresses_for_db)
-                    .await?;
-            }
-
-            if !utxos_for_db.is_empty() {
-                Utxos::new(keychain_id, pool.clone())
-                    .persist_all_in_tx(&mut tx, utxos_for_db)
-                    .await?;
-            }
-
-            if !txs_for_db.is_empty() {
-                Transactions::new(keychain_id, pool)
-                    .persist_all_in_tx(&mut tx, txs_for_db)
-                    .await?;
-            }
-
-            tx.commit()
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-
-            Ok::<_, bdk::Error>(())
-        })?;
-
-        self.cache.extend_script_pubkeys(addresses_for_cache)?;
-        self.cache.extend_txs(txs_for_cache)?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,9 +729,20 @@ mod tests {
     fn wallet_cache_raw_txs_loaded_flag_defaults_false_and_can_be_set() {
         let cache = WalletCache::new();
         assert!(!cache.raw_txs_fully_loaded());
+        assert!(!cache.summary_txs_fully_loaded());
 
         cache.set_raw_txs_fully_loaded();
         assert!(cache.raw_txs_fully_loaded());
+        assert!(cache.summary_txs_fully_loaded());
+    }
+
+    #[test]
+    fn wallet_cache_summary_txs_loaded_flag_defaults_false_and_can_be_set() {
+        let cache = WalletCache::new();
+        assert!(!cache.summary_txs_fully_loaded());
+
+        cache.set_summary_txs_fully_loaded();
+        assert!(cache.summary_txs_fully_loaded());
     }
 
     #[test]
@@ -962,5 +886,63 @@ mod tests {
             .all_script_pubkeys(None)
             .expect("all_script_pubkeys should succeed");
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn wallet_cache_tracks_missing_txids_and_pending_drain() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+        let another = Txid::from_slice(&[1; 32]).expect("valid txid");
+
+        cache.mark_txid_missing(txid).expect("mark should succeed");
+        cache
+            .mark_txid_missing(another)
+            .expect("mark should succeed");
+        assert!(cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+        assert!(cache.should_batch_resolve_tx_misses(1));
+
+        let drained = cache
+            .drain_pending_tx_misses(1)
+            .expect("drain should succeed");
+        assert_eq!(drained.len(), 1);
+
+        cache
+            .mark_txid_not_missing(&txid)
+            .expect("clear should succeed");
+        assert!(!cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+    }
+
+    #[test]
+    fn wallet_cache_tracks_missing_scripts_and_pending_drain() {
+        let cache = WalletCache::new();
+        let first = ScriptBuf::from(vec![0x51]);
+        let second = ScriptBuf::from(vec![0x52]);
+
+        cache
+            .mark_script_missing(first.clone())
+            .expect("mark should succeed");
+        cache
+            .mark_script_missing(second.clone())
+            .expect("mark should succeed");
+        assert!(cache
+            .script_marked_missing(first.as_script())
+            .expect("lookup should succeed"));
+        assert!(cache.should_batch_resolve_script_misses(1));
+
+        let drained = cache
+            .drain_pending_script_misses(1)
+            .expect("drain should succeed");
+        assert_eq!(drained.len(), 1);
+
+        cache
+            .mark_script_not_missing(first.as_script())
+            .expect("clear should succeed");
+        assert!(!cache
+            .script_marked_missing(first.as_script())
+            .expect("lookup should succeed"));
     }
 }
