@@ -169,6 +169,7 @@ impl SqlxWalletDb {
             }
 
             if self.cache.raw_txs_fully_loaded() {
+                self.cache.record_missing_txid(*txid)?;
                 return Ok((None, "cache_mode_miss"));
             }
         }
