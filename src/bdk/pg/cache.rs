@@ -255,7 +255,7 @@ impl WalletCache {
             let mut cache = self.lock_transactions()?;
             cache.remove(txid);
         }
-        self.mark_txid_missing(*txid)?;
+        self.record_missing_txid(*txid)?;
         Ok(())
     }
 
@@ -264,7 +264,15 @@ impl WalletCache {
         Ok(missing.contains(script))
     }
 
-    pub(super) fn mark_script_missing(&self, script: ScriptBuf) -> Result<(), bdk::Error> {
+    pub(super) fn record_missing_script(&self, script: ScriptBuf) -> Result<(), bdk::Error> {
+        self.lock_missing_script_pubkeys()?.insert(script);
+        Ok(())
+    }
+
+    pub(super) fn record_and_enqueue_missing_script(
+        &self,
+        script: ScriptBuf,
+    ) -> Result<(), bdk::Error> {
         self.lock_missing_script_pubkeys()?.insert(script.clone());
         self.lock_pending_script_misses()?.insert(script);
         Ok(())
@@ -293,7 +301,12 @@ impl WalletCache {
         Ok(missing.contains(txid))
     }
 
-    pub(super) fn mark_txid_missing(&self, txid: Txid) -> Result<(), bdk::Error> {
+    pub(super) fn record_missing_txid(&self, txid: Txid) -> Result<(), bdk::Error> {
+        self.lock_missing_txids()?.insert(txid);
+        Ok(())
+    }
+
+    pub(super) fn record_and_enqueue_missing_txid(&self, txid: Txid) -> Result<(), bdk::Error> {
         self.lock_missing_txids()?.insert(txid);
         self.lock_pending_tx_misses()?.insert(txid);
         Ok(())

@@ -110,7 +110,7 @@ impl SqlxWalletDb {
 
         // Once both keychains are fully hydrated in this process, a cache miss is definitive.
         if self.cache.script_pubkeys_fully_loaded(None) {
-            self.cache.mark_script_missing(script.to_owned())?;
+            self.cache.record_missing_script(script.to_owned())?;
             return Ok((None, "fully_loaded_miss"));
         }
 
@@ -131,7 +131,8 @@ impl SqlxWalletDb {
             return Ok((Some(value), "db_hit"));
         }
 
-        self.cache.mark_script_missing(script_pubkey)?;
+        self.cache
+            .record_and_enqueue_missing_script(script_pubkey)?;
 
         Ok((None, "db_miss"))
     }
@@ -166,7 +167,7 @@ impl SqlxWalletDb {
 
         // Once raw txs are fully loaded in this process, a miss is definitive.
         if self.cache.raw_txs_fully_loaded() {
-            self.cache.mark_txid_missing(*txid)?;
+            self.cache.record_missing_txid(*txid)?;
             return Ok((None, "fully_loaded_miss"));
         }
 
@@ -176,7 +177,7 @@ impl SqlxWalletDb {
                 return Ok((Some(tx), "batch_resolve"));
             }
             if self.cache.raw_txs_fully_loaded() {
-                self.cache.mark_txid_missing(*txid)?;
+                self.cache.record_missing_txid(*txid)?;
                 return Ok((None, "batch_resolve_mode_miss"));
             }
         }
@@ -197,7 +198,7 @@ impl SqlxWalletDb {
                 Ok((None, "db_mode_miss"))
             }
         } else {
-            self.cache.mark_txid_missing(*txid)?;
+            self.cache.record_and_enqueue_missing_txid(*txid)?;
             Ok((None, "db_miss"))
         }
     }

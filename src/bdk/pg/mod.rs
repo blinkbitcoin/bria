@@ -336,9 +336,11 @@ mod tests {
         let txid = Txid::all_zeros();
         let another = Txid::from_slice(&[1; 32]).expect("valid txid");
 
-        cache.mark_txid_missing(txid).expect("mark should succeed");
         cache
-            .mark_txid_missing(another)
+            .record_and_enqueue_missing_txid(txid)
+            .expect("mark should succeed");
+        cache
+            .record_and_enqueue_missing_txid(another)
             .expect("mark should succeed");
         assert!(cache
             .txid_marked_missing(&txid)
@@ -367,10 +369,10 @@ mod tests {
         let second = ScriptBuf::from(vec![0x52]);
 
         cache
-            .mark_script_missing(first.clone())
+            .record_and_enqueue_missing_script(first.clone())
             .expect("mark should succeed");
         cache
-            .mark_script_missing(second.clone())
+            .record_and_enqueue_missing_script(second.clone())
             .expect("mark should succeed");
         assert!(cache
             .script_marked_missing(first.as_script())
@@ -397,7 +399,9 @@ mod tests {
         let cache = WalletCache::new();
         let txid = Txid::all_zeros();
 
-        cache.mark_txid_missing(txid).expect("mark should succeed");
+        cache
+            .record_and_enqueue_missing_txid(txid)
+            .expect("mark should succeed");
         assert!(cache
             .txid_marked_missing(&txid)
             .expect("lookup should succeed"));

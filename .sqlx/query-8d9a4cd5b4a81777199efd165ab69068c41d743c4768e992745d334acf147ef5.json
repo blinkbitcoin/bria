@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT tx_id, sent, height,\n                   (details_json->>'received')::BIGINT AS \"received?\",\n                   (details_json->>'fee')::BIGINT AS \"fee?\",\n                   (details_json->'confirmation_time'->>'timestamp')::BIGINT AS \"confirmation_timestamp?\"\n              FROM bdk_transactions\n             WHERE keychain_id = $1\n               AND deleted_at IS NULL\n               AND ($2::TEXT IS NULL OR tx_id > $2)\n             ORDER BY tx_id ASC\n             LIMIT $3",
+  "query": "\n            SELECT tx_id, sent, height,\n                   (details_json->>'received')::BIGINT AS \"received?\",\n                   (details_json->>'fee')::BIGINT AS \"fee?\",\n                   (details_json->'confirmation_time'->>'timestamp')::BIGINT AS \"confirmation_timestamp?\"\n              FROM bdk_transactions\n             WHERE keychain_id = $1\n               AND deleted_at IS NULL\n                AND ($2::TEXT IS NULL OR tx_id > $2)\n             ORDER BY tx_id ASC\n             LIMIT $3",
   "describe": {
     "columns": [
       {
@@ -50,5 +50,5 @@
       null
     ]
   },
-  "hash": "a4032bf252ce37d9bbf2f5a0c83fe32ec37559b6ab9a8f0ed53ed8e5503c3ead"
+  "hash": "8d9a4cd5b4a81777199efd165ab69068c41d743c4768e992745d334acf147ef5"
 }

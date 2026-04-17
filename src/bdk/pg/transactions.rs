@@ -245,11 +245,11 @@ impl Transactions {
               FROM bdk_transactions
              WHERE keychain_id = $1
                AND deleted_at IS NULL
-               AND ($2::TEXT IS NULL OR tx_id > $2)
+                AND ($2::TEXT IS NULL OR tx_id > $2)
              ORDER BY tx_id ASC
              LIMIT $3"#,
                 self.keychain_id as KeychainId,
-                last_tx_id,
+                last_tx_id.as_deref(),
                 Self::LOAD_BATCH_SIZE,
             )
             .fetch(&self.pool);
@@ -292,11 +292,11 @@ impl Transactions {
               FROM bdk_transactions
              WHERE keychain_id = $1
                AND deleted_at IS NULL
-               AND ($2::TEXT IS NULL OR tx_id > $2)
+                AND ($2::TEXT IS NULL OR tx_id > $2)
              ORDER BY tx_id ASC
              LIMIT $3"#,
                 self.keychain_id as KeychainId,
-                last_tx_id,
+                last_tx_id.as_deref(),
                 Self::LOAD_BATCH_SIZE,
             )
             .fetch(&self.pool);
