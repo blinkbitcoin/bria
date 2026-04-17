@@ -1,4 +1,5 @@
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use futures::{TryStream, TryStreamExt};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -28,6 +29,21 @@ impl ScriptPubkeys {
             ScriptBuf::from(script),
             (bdk::KeychainKind::from(keychain_kind), path),
         ))
+    }
+
+    async fn next_stream_row<T, S>(stream: &mut S) -> Result<Option<T>, bdk::Error>
+    where
+        S: TryStream<Ok = T, Error = sqlx::Error> + Unpin,
+    {
+        stream
+            .try_next()
+            .await
+            .map_err(|e| bdk::Error::Generic(e.to_string()))
+    }
+
+    fn record_list_with_paths_row(last_path: &mut Option<i32>, batch_rows: &mut usize, path: i32) {
+        *last_path = Some(path);
+        *batch_rows += 1;
     }
 
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
@@ -160,13 +176,13 @@ impl ScriptPubkeys {
             .iter()
             .map(|script| format!("{script:02x}"))
             .collect();
-        let rows = sqlx::query(
-            r#"SELECT script, keychain_kind, path
+        let rows = sqlx::query!(
+            r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind", path
             FROM bdk_script_pubkeys
             WHERE keychain_id = $1 AND script_hex = ANY($2)"#,
+            Uuid::from(self.keychain_id),
+            &script_hexes,
         )
-        .bind(Uuid::from(self.keychain_id))
-        .bind(&script_hexes)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
@@ -175,9 +191,9 @@ impl ScriptPubkeys {
 
         rows.into_iter()
             .map(|row| {
-                let keychain_kind_raw: BdkKeychainKind = row.get("keychain_kind");
-                let path: i32 = row.get("path");
-                let script: Vec<u8> = row.get("script");
+                let keychain_kind_raw: BdkKeychainKind = row.keychain_kind;
+                let path: i32 = row.path;
+                let script: Vec<u8> = row.script;
                 let (script, (_, path)) = Self::script_with_path(script, keychain_kind_raw, path)?;
                 Ok((script, (keychain_kind_raw, path)))
             })
@@ -247,33 +263,32 @@ impl ScriptPubkeys {
         let mut all = Vec::new();
 
         loop {
-            let rows = sqlx::query(
-                r#"SELECT script, keychain_kind, path
+            let mut stream = sqlx::query!(
+                r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind", path
                 FROM bdk_script_pubkeys
                 WHERE keychain_id = $1
                   AND keychain_kind = $2
                   AND ($3::INT4 IS NULL OR path > $3)
                 ORDER BY path ASC
                 LIMIT $4"#,
+                keychain_id,
+                keychain_kind as BdkKeychainKind,
+                last_path,
+                Self::LIST_WITH_PATHS_BATCH_SIZE,
             )
-            .bind(keychain_id)
-            .bind(keychain_kind)
-            .bind(last_path)
-            .bind(Self::LIST_WITH_PATHS_BATCH_SIZE)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+            .fetch(&self.pool);
 
-            if rows.is_empty() {
-                break;
+            let mut batch_rows = 0usize;
+            while let Some(row) = Self::next_stream_row(&mut stream).await? {
+                let path: i32 = row.path;
+                let script: Vec<u8> = row.script;
+                let row_keychain_kind: BdkKeychainKind = row.keychain_kind;
+                Self::record_list_with_paths_row(&mut last_path, &mut batch_rows, path);
+                all.push(Self::script_with_path(script, row_keychain_kind, path)?);
             }
 
-            for row in rows {
-                let path: i32 = row.get("path");
-                let script: Vec<u8> = row.get("script");
-                let keychain_kind: BdkKeychainKind = row.get("keychain_kind");
-                last_path = Some(path);
-                all.push(Self::script_with_path(script, keychain_kind, path)?);
+            if batch_rows == 0 {
+                break;
             }
         }
 

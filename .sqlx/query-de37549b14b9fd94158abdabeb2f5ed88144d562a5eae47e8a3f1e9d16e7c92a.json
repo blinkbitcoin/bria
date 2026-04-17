@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT script, keychain_kind as \"keychain_kind: BdkKeychainKind\", path\n                FROM bdk_script_pubkeys\n                WHERE keychain_id = $1\n                  AND keychain_kind = $2\n                  AND ($3::INT4 IS NULL OR path > $3)\n                ORDER BY path ASC\n                LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "script",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "keychain_kind: BdkKeychainKind",
+        "type_info": {
+          "Custom": {
+            "name": "bdkkeychainkind",
+            "kind": {
+              "Enum": [
+                "external",
+                "internal"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "path",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "bdkkeychainkind",
+            "kind": {
+              "Enum": [
+                "external",
+                "internal"
+              ]
+            }
+          }
+        },
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "de37549b14b9fd94158abdabeb2f5ed88144d562a5eae47e8a3f1e9d16e7c92a"
+}

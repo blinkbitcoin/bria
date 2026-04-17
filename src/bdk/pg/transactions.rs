@@ -1,5 +1,6 @@
 use bdk::{bitcoin::Txid, BlockTime, LocalUtxo, TransactionDetails};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction as SqlxTransaction};
+use futures::{TryStream, TryStreamExt};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction as SqlxTransaction};
 use tracing::instrument;
 
 use std::collections::HashMap;
@@ -33,6 +34,8 @@ pub struct Transactions {
 }
 
 impl Transactions {
+    const LOAD_BATCH_SIZE: i64 = 10_000;
+
     fn parse_txid(tx_id: &str) -> Result<Txid, bdk::Error> {
         tx_id
             .parse::<Txid>()
@@ -44,6 +47,45 @@ impl Transactions {
     ) -> Result<TransactionDetails, bdk::Error> {
         serde_json::from_value::<TransactionDetails>(details_json)
             .map_err(|e| bdk::Error::Generic(format!("could not deserialize tx details: {e}")))
+    }
+
+    fn to_u64(value: i64, field: &str) -> Result<u64, bdk::Error> {
+        if value < 0 {
+            return Err(bdk::Error::Generic(format!(
+                "negative {field} value in bdk_transactions"
+            )));
+        }
+        Ok(value as u64)
+    }
+
+    fn to_u32(value: i32, field: &str) -> Result<u32, bdk::Error> {
+        if value < 0 {
+            return Err(bdk::Error::Generic(format!(
+                "negative {field} value in bdk_transactions"
+            )));
+        }
+        Ok(value as u32)
+    }
+
+    async fn next_stream_row<T, S>(stream: &mut S) -> Result<Option<T>, bdk::Error>
+    where
+        S: TryStream<Ok = T, Error = sqlx::Error> + Unpin,
+    {
+        stream
+            .try_next()
+            .await
+            .map_err(|e| bdk::Error::Generic(e.to_string()))
+    }
+
+    fn record_loaded_row(
+        last_tx_id: &mut Option<String>,
+        total_rows: &mut usize,
+        batch_rows: &mut usize,
+        tx_id: String,
+    ) {
+        *last_tx_id = Some(tx_id);
+        *total_rows += 1;
+        *batch_rows += 1;
     }
 
     fn serialize_batch(
@@ -215,16 +257,16 @@ impl Transactions {
         }
 
         let tx_ids_text: Vec<String> = tx_ids.iter().map(ToString::to_string).collect();
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             r#"
         SELECT tx_id, details_json
           FROM bdk_transactions
          WHERE keychain_id = $1
            AND deleted_at IS NULL
            AND tx_id = ANY($2)"#,
+            self.keychain_id as KeychainId,
+            &tx_ids_text,
         )
-        .bind(self.keychain_id as KeychainId)
-        .bind(&tx_ids_text)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
@@ -233,10 +275,8 @@ impl Transactions {
 
         rows.into_iter()
             .map(|row| {
-                let tx_id: String = row.get("tx_id");
-                let txid = Self::parse_txid(&tx_id)?;
-                let details_json: serde_json::Value = row.get("details_json");
-                let tx = Self::deserialize_details(details_json)?;
+                let txid = Self::parse_txid(&row.tx_id)?;
+                let tx = Self::deserialize_details(row.details_json)?;
                 Ok((txid, tx))
             })
             .collect()
@@ -244,18 +284,40 @@ impl Transactions {
 
     #[instrument(name = "bdk.transactions.load_all", skip(self), fields(n_rows))]
     pub async fn load_all(&self) -> Result<HashMap<Txid, TransactionDetails>, bdk::Error> {
-        let txs = sqlx::query!(
-            r#"
-        SELECT details_json FROM bdk_transactions WHERE keychain_id = $1 AND deleted_at IS NULL"#,
-            self.keychain_id as KeychainId,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        tracing::Span::current().record("n_rows", txs.len());
-        txs.into_iter()
-            .map(|tx| Self::deserialize_details(tx.details_json).map(|tx| (tx.txid, tx)))
-            .collect()
+        let mut count = 0usize;
+        let mut out = HashMap::new();
+        let mut last_tx_id: Option<String> = None;
+
+        loop {
+            let mut stream = sqlx::query!(
+                r#"
+            SELECT tx_id, details_json
+              FROM bdk_transactions
+             WHERE keychain_id = $1
+               AND deleted_at IS NULL
+               AND ($2::TEXT IS NULL OR tx_id > $2)
+             ORDER BY tx_id ASC
+             LIMIT $3"#,
+                self.keychain_id as KeychainId,
+                last_tx_id,
+                Self::LOAD_BATCH_SIZE,
+            )
+            .fetch(&self.pool);
+
+            let mut batch_rows = 0usize;
+            while let Some(row) = Self::next_stream_row(&mut stream).await? {
+                let details = Self::deserialize_details(row.details_json)?;
+                Self::record_loaded_row(&mut last_tx_id, &mut count, &mut batch_rows, row.tx_id);
+                out.insert(details.txid, details);
+            }
+
+            if batch_rows == 0 {
+                break;
+            }
+        }
+
+        tracing::Span::current().record("n_rows", count);
+        Ok(out)
     }
 
     #[instrument(
@@ -266,51 +328,37 @@ impl Transactions {
     pub async fn load_all_summaries(
         &self,
     ) -> Result<HashMap<Txid, TransactionDetails>, bdk::Error> {
-        let rows = sqlx::query!(
-            r#"
-        SELECT tx_id, sent, height,
-               (details_json->>'received')::BIGINT AS "received?",
-               (details_json->>'fee')::BIGINT AS "fee?",
-               (details_json->'confirmation_time'->>'timestamp')::BIGINT AS "confirmation_timestamp?"
-          FROM bdk_transactions
-         WHERE keychain_id = $1 AND deleted_at IS NULL"#,
-            self.keychain_id as KeychainId,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+        let mut count = 0usize;
+        let mut out = HashMap::new();
+        let mut last_tx_id: Option<String> = None;
 
-        tracing::Span::current().record("n_rows", rows.len());
+        loop {
+            let mut stream = sqlx::query!(
+                r#"
+            SELECT tx_id, sent, height,
+                   (details_json->>'received')::BIGINT AS "received?",
+                   (details_json->>'fee')::BIGINT AS "fee?",
+                   (details_json->'confirmation_time'->>'timestamp')::BIGINT AS "confirmation_timestamp?"
+              FROM bdk_transactions
+             WHERE keychain_id = $1
+               AND deleted_at IS NULL
+               AND ($2::TEXT IS NULL OR tx_id > $2)
+             ORDER BY tx_id ASC
+             LIMIT $3"#,
+                self.keychain_id as KeychainId,
+                last_tx_id,
+                Self::LOAD_BATCH_SIZE,
+            )
+            .fetch(&self.pool);
 
-        fn to_u64(value: i64, field: &str) -> Result<u64, bdk::Error> {
-            if value < 0 {
-                return Err(bdk::Error::Generic(format!(
-                    "negative {field} value in bdk_transactions"
-                )));
-            }
-            Ok(value as u64)
-        }
-
-        fn to_u32(value: i32, field: &str) -> Result<u32, bdk::Error> {
-            if value < 0 {
-                return Err(bdk::Error::Generic(format!(
-                    "negative {field} value in bdk_transactions"
-                )));
-            }
-            Ok(value as u32)
-        }
-
-        rows.into_iter()
-            .map(|row| {
-                let txid = row
-                    .tx_id
-                    .parse::<Txid>()
-                    .map_err(|e| bdk::Error::Generic(format!("invalid tx_id in db: {e}")))?;
+            let mut batch_rows = 0usize;
+            while let Some(row) = Self::next_stream_row(&mut stream).await? {
+                let txid = Self::parse_txid(&row.tx_id)?;
 
                 let confirmation_time = match (row.height, row.confirmation_timestamp) {
                     (Some(height), Some(timestamp)) => Some(BlockTime {
-                        height: to_u32(height, "height")?,
-                        timestamp: to_u64(timestamp, "confirmation timestamp")?,
+                        height: Self::to_u32(height, "height")?,
+                        timestamp: Self::to_u64(timestamp, "confirmation timestamp")?,
                     }),
                     _ => None,
                 };
@@ -318,15 +366,23 @@ impl Transactions {
                 let details = TransactionDetails {
                     txid,
                     transaction: None,
-                    received: to_u64(row.received.unwrap_or_default(), "received")?,
-                    sent: to_u64(row.sent, "sent")?,
-                    fee: row.fee.map(|f| to_u64(f, "fee")).transpose()?,
+                    received: Self::to_u64(row.received.unwrap_or_default(), "received")?,
+                    sent: Self::to_u64(row.sent, "sent")?,
+                    fee: row.fee.map(|f| Self::to_u64(f, "fee")).transpose()?,
                     confirmation_time,
                 };
 
-                Ok((txid, details))
-            })
-            .collect()
+                Self::record_loaded_row(&mut last_tx_id, &mut count, &mut batch_rows, row.tx_id);
+                out.insert(txid, details);
+            }
+
+            if batch_rows == 0 {
+                break;
+            }
+        }
+
+        tracing::Span::current().record("n_rows", count);
+        Ok(out)
     }
 
     #[instrument(name = "bdk.transactions.find_unsynced_tx", skip(self), fields(n_rows))]
