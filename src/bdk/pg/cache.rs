@@ -17,7 +17,12 @@ pub(super) struct WalletCache {
     missing_script_pubkeys: Arc<Mutex<HashSet<ScriptBuf>>>,
     missing_txids: Arc<Mutex<HashSet<Txid>>>,
     pending_script_misses: Arc<Mutex<HashSet<ScriptBuf>>>,
+    // Txids confirmed absent from the DB in this process. These are retried in batches to
+    // recover from races where rows appear after an earlier miss.
     pending_tx_misses: Arc<Mutex<HashSet<Txid>>>,
+    // Txids not yet seen in the in-process cache and not yet known-missing. These are batched
+    // before we fall back to recording a miss.
+    pending_tx_lookups: Arc<Mutex<HashSet<Txid>>>,
     // Process-local hint for which keychain script path sets are fully hydrated.
     // Bit 0: external, bit 1: internal.
     // This is intentionally not synchronized across processes.
@@ -47,6 +52,7 @@ impl WalletCache {
             missing_txids: Arc::new(Mutex::new(HashSet::new())),
             pending_script_misses: Arc::new(Mutex::new(HashSet::new())),
             pending_tx_misses: Arc::new(Mutex::new(HashSet::new())),
+            pending_tx_lookups: Arc::new(Mutex::new(HashSet::new())),
             script_pubkeys_loaded_mask: Arc::new(AtomicU8::new(0)),
             raw_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
             summary_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
@@ -97,6 +103,10 @@ impl WalletCache {
 
     fn lock_pending_tx_misses(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
         self.lock_with_error(&self.pending_tx_misses, "pending tx misses cache")
+    }
+
+    fn lock_pending_tx_lookups(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
+        self.lock_with_error(&self.pending_tx_lookups, "pending tx lookups cache")
     }
 
     pub(super) fn get_script_pubkey_path(
@@ -173,15 +183,6 @@ impl WalletCache {
         Ok(cache.get(txid).cloned())
     }
 
-    pub(super) fn insert_tx(&self, txid: Txid, tx: TransactionDetails) -> Result<(), bdk::Error> {
-        {
-            let mut cache = self.lock_transactions()?;
-            cache.insert(txid, tx);
-        }
-        self.mark_txid_not_missing(&txid)?;
-        Ok(())
-    }
-
     fn clear_tx_miss_tracking<'a, I>(&self, txids: I) -> Result<(), bdk::Error>
     where
         I: IntoIterator<Item = &'a Txid>,
@@ -195,12 +196,24 @@ impl WalletCache {
         Ok(())
     }
 
+    fn clear_pending_tx_lookups<'a, I>(&self, txids: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = &'a Txid>,
+    {
+        let mut pending = self.lock_pending_tx_lookups()?;
+        for txid in txids {
+            pending.remove(txid);
+        }
+        Ok(())
+    }
+
     pub(super) fn extend_txs<I>(&self, entries: I) -> Result<(), bdk::Error>
     where
         I: IntoIterator<Item = (Txid, TransactionDetails)>,
     {
         let entries: Vec<_> = entries.into_iter().collect();
         self.clear_tx_miss_tracking(entries.iter().map(|(txid, _)| txid))?;
+        self.clear_pending_tx_lookups(entries.iter().map(|(txid, _)| txid))?;
         let mut cache = self.lock_transactions()?;
         cache.extend(entries);
         Ok(())
@@ -212,6 +225,7 @@ impl WalletCache {
     {
         let entries: Vec<_> = entries.into_iter().collect();
         self.clear_tx_miss_tracking(entries.iter().map(|(txid, _)| txid))?;
+        self.clear_pending_tx_lookups(entries.iter().map(|(txid, _)| txid))?;
         let mut cache = self.lock_transactions()?;
         for (txid, mut summary) in entries {
             // Summary refreshes may run after raw tx bytes were already hydrated. Preserve any
@@ -333,6 +347,30 @@ impl WalletCache {
     pub(super) fn mark_txid_not_missing(&self, txid: &Txid) -> Result<(), bdk::Error> {
         self.lock_missing_txids()?.remove(txid);
         self.lock_pending_tx_misses()?.remove(txid);
+        self.lock_pending_tx_lookups()?.remove(txid);
+        Ok(())
+    }
+
+    pub(super) fn enqueue_pending_tx_lookup(&self, txid: Txid) -> Result<(), bdk::Error> {
+        self.lock_pending_tx_lookups()?.insert(txid);
+        Ok(())
+    }
+
+    pub(super) fn drain_pending_tx_lookups(&self, max: usize) -> Result<Vec<Txid>, bdk::Error> {
+        let mut pending = self.lock_pending_tx_lookups()?;
+        let drained: Vec<_> = pending.iter().take(max).copied().collect();
+        for txid in &drained {
+            pending.remove(txid);
+        }
+        Ok(drained)
+    }
+
+    pub(super) fn requeue_pending_tx_lookups<I>(&self, txids: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = Txid>,
+    {
+        let mut pending = self.lock_pending_tx_lookups()?;
+        pending.extend(txids);
         Ok(())
     }
 
@@ -370,6 +408,14 @@ impl WalletCache {
         Ok(pending.len() >= threshold)
     }
 
+    pub(super) fn should_batch_resolve_tx_lookups(
+        &self,
+        threshold: usize,
+    ) -> Result<bool, bdk::Error> {
+        let pending = self.lock_pending_tx_lookups()?;
+        Ok(pending.len() >= threshold)
+    }
+
     pub(super) fn invalidate(&self) {
         Self::clear_even_if_poisoned(&self.script_pubkeys);
         Self::clear_even_if_poisoned(&self.transactions);
@@ -377,6 +423,7 @@ impl WalletCache {
         Self::clear_even_if_poisoned(&self.missing_txids);
         Self::clear_even_if_poisoned(&self.pending_script_misses);
         Self::clear_even_if_poisoned(&self.pending_tx_misses);
+        Self::clear_even_if_poisoned(&self.pending_tx_lookups);
 
         self.script_pubkeys_loaded_mask.store(0, Ordering::Release);
         self.raw_txs_fully_loaded.store(false, Ordering::Release);

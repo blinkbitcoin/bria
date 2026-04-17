@@ -110,6 +110,23 @@ impl Transactions {
         Self { keychain_id, pool }
     }
 
+    #[instrument(name = "bdk.transactions.count_active", skip(self))]
+    pub async fn count_active(&self) -> Result<i64, bdk::Error> {
+        let row = sqlx::query!(
+            r#"
+        SELECT COUNT(*) AS "count!"
+          FROM bdk_transactions
+         WHERE keychain_id = $1
+           AND deleted_at IS NULL"#,
+            self.keychain_id as KeychainId,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+        Ok(row.count)
+    }
+
     pub async fn persist_all_in_tx(
         &self,
         tx: &mut SqlxTransaction<'_, Postgres>,
@@ -180,21 +197,6 @@ impl Transactions {
                 .map_err(|e| bdk::Error::Generic(format!("could not deserialize tx details: {e}")))
         })
         .transpose()
-    }
-
-    #[instrument(name = "bdk.transactions.find_by_id", skip_all)]
-    pub async fn find_by_id(&self, tx_id: &Txid) -> Result<Option<TransactionDetails>, bdk::Error> {
-        let tx = sqlx::query!(
-            r#"
-        SELECT details_json FROM bdk_transactions WHERE keychain_id = $1 AND tx_id = $2 AND deleted_at IS NULL"#,
-            self.keychain_id as KeychainId,
-            tx_id.to_string(),
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        tx.map(|tx| Self::deserialize_details(tx.details_json))
-            .transpose()
     }
 
     #[instrument(name = "bdk.transactions.find_by_ids", skip_all, fields(n_requested = tx_ids.len(), n_found))]

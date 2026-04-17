@@ -18,31 +18,62 @@ pub(super) enum TxLookupMode {
 
 #[derive(Copy, Clone)]
 pub(super) struct MissResolutionPolicy {
-    pub threshold: usize,
-    pub batch_size: usize,
+    pub tx_lookup_threshold: usize,
+    pub tx_lookup_batch_size: usize,
+    pub tx_miss_threshold: usize,
+    pub tx_miss_batch_size: usize,
+    pub script_miss_threshold: usize,
+    pub script_miss_batch_size: usize,
 }
 
 impl Default for MissResolutionPolicy {
     fn default() -> Self {
         Self {
-            threshold: 64,
-            batch_size: 512,
+            tx_lookup_threshold: 64,
+            tx_lookup_batch_size: 512,
+            tx_miss_threshold: 64,
+            tx_miss_batch_size: 512,
+            script_miss_threshold: 64,
+            script_miss_batch_size: 512,
         }
     }
 }
 
 impl SqlxWalletDb {
+    fn lookup_cached_tx_with_mode(
+        &self,
+        txid: &Txid,
+        mode: TxLookupMode,
+        hit_source: LookupSource,
+        mode_miss_source: LookupSource,
+    ) -> Result<Option<TxLookup>, bdk::Error> {
+        let Some(tx) = self.cache.get_tx(txid)? else {
+            return Ok(None);
+        };
+
+        if Self::tx_matches_lookup_mode(&tx, mode) {
+            return Ok(Some((Some(tx), hit_source)));
+        }
+
+        if self.cache.raw_txs_fully_loaded() {
+            self.cache.record_missing_txid(*txid)?;
+            return Ok(Some((None, mode_miss_source)));
+        }
+
+        Ok(None)
+    }
+
     fn resolve_pending_script_misses(&self) -> Result<(), bdk::Error> {
         if !self
             .cache
-            .should_batch_resolve_script_misses(self.miss_resolution.threshold)?
+            .should_batch_resolve_script_misses(self.miss_resolution.script_miss_threshold)?
         {
             return Ok(());
         }
 
         let pending = self
             .cache
-            .drain_pending_script_misses(self.miss_resolution.batch_size)?;
+            .drain_pending_script_misses(self.miss_resolution.script_miss_batch_size)?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -73,14 +104,14 @@ impl SqlxWalletDb {
     fn resolve_pending_tx_misses(&self) -> Result<(), bdk::Error> {
         if !self
             .cache
-            .should_batch_resolve_tx_misses(self.miss_resolution.threshold)?
+            .should_batch_resolve_tx_misses(self.miss_resolution.tx_miss_threshold)?
         {
             return Ok(());
         }
 
         let pending = self
             .cache
-            .drain_pending_tx_misses(self.miss_resolution.batch_size)?;
+            .drain_pending_tx_misses(self.miss_resolution.tx_miss_batch_size)?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -102,6 +133,54 @@ impl SqlxWalletDb {
         }
 
         Ok(())
+    }
+
+    fn resolve_pending_tx_lookups_internal(
+        &self,
+        force: bool,
+    ) -> Result<Option<usize>, bdk::Error> {
+        if !force
+            && !self
+                .cache
+                .should_batch_resolve_tx_lookups(self.miss_resolution.tx_lookup_threshold)?
+        {
+            return Ok(None);
+        }
+
+        let pending = self
+            .cache
+            .drain_pending_tx_lookups(self.miss_resolution.tx_lookup_batch_size)?;
+        if pending.is_empty() {
+            return Ok(None);
+        }
+
+        let found = match self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().find_by_ids(&pending).await })
+        {
+            Ok(found) => found,
+            Err(error) => {
+                self.cache.requeue_pending_tx_lookups(pending)?;
+                return Err(error);
+            }
+        };
+        let n_found = found.len();
+
+        if n_found > 0 {
+            self.cache.extend_txs(found)?;
+        }
+
+        Ok(Some(n_found))
+    }
+
+    fn resolve_pending_tx_lookups(&self) -> Result<(), bdk::Error> {
+        let _ = self.resolve_pending_tx_lookups_internal(false)?;
+        Ok(())
+    }
+
+    fn resolve_pending_tx_lookups_force(&self) -> Result<Option<usize>, bdk::Error> {
+        self.resolve_pending_tx_lookups_internal(true)
     }
 
     pub(super) fn lookup_script_pubkey_path(
@@ -163,15 +242,10 @@ impl SqlxWalletDb {
             return Ok((None, "batch_mode_miss"));
         }
 
-        if let Some(tx) = self.cache.get_tx(txid)? {
-            if Self::tx_matches_lookup_mode(&tx, mode) {
-                return Ok((Some(tx), "cache"));
-            }
-
-            if self.cache.raw_txs_fully_loaded() {
-                self.cache.record_missing_txid(*txid)?;
-                return Ok((None, "cache_mode_miss"));
-            }
+        if let Some(result) =
+            self.lookup_cached_tx_with_mode(txid, mode, "cache", "cache_mode_miss")?
+        {
+            return Ok(result);
         }
 
         if self.cache.txid_marked_missing(txid)? {
@@ -185,36 +259,34 @@ impl SqlxWalletDb {
             return Ok((None, "fully_loaded_miss"));
         }
 
+        self.cache.enqueue_pending_tx_lookup(*txid)?;
+        self.resolve_pending_tx_lookups()?;
+        if let Some(result) =
+            self.lookup_cached_tx_with_mode(txid, mode, "batch_lookup", "batch_lookup_mode_miss")?
+        {
+            return Ok(result);
+        }
+
+        if self.resolve_pending_tx_lookups_force()?.is_some() {
+            if let Some(result) = self.lookup_cached_tx_with_mode(
+                txid,
+                mode,
+                "forced_batch_lookup",
+                "forced_batch_lookup_mode_miss",
+            )? {
+                return Ok(result);
+            }
+        }
+
         self.resolve_pending_tx_misses()?;
-        if let Some(tx) = self.cache.get_tx(txid)? {
-            if Self::tx_matches_lookup_mode(&tx, mode) {
-                return Ok((Some(tx), "batch_resolve"));
-            }
-            if self.cache.raw_txs_fully_loaded() {
-                self.cache.record_missing_txid(*txid)?;
-                return Ok((None, "batch_resolve_mode_miss"));
-            }
+        if let Some(result) =
+            self.lookup_cached_tx_with_mode(txid, mode, "batch_resolve", "batch_resolve_mode_miss")?
+        {
+            return Ok(result);
         }
 
-        let found = self
-            .ctx
-            .rt
-            .block_on(async { self.transactions_repo().find_by_id(txid).await })?;
-
-        // DB rows represent persisted TransactionDetails. In `RequireRaw` mode, a summary-only
-        // row is a mode miss (not an existence miss).
-
-        if let Some(tx) = &found {
-            self.cache.insert_tx(tx.txid, tx.clone())?;
-            if Self::tx_matches_lookup_mode(tx, mode) {
-                Ok((found, "db_hit"))
-            } else {
-                Ok((None, "db_mode_miss"))
-            }
-        } else {
-            self.cache.record_and_enqueue_missing_txid(*txid)?;
-            Ok((None, "db_miss"))
-        }
+        self.cache.record_and_enqueue_missing_txid(*txid)?;
+        Ok((None, "db_miss"))
     }
 
     pub(super) fn lookup_tx(&self, txid: &Txid) -> Result<TxLookup, bdk::Error> {

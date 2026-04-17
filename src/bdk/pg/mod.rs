@@ -75,6 +75,18 @@ impl SqlxWalletDb {
         }
     }
 
+    pub fn tx_count(&self) -> Result<i64, bdk::Error> {
+        self.ctx
+            .rt
+            .block_on(async { self.transactions_repo().count_active().await })
+    }
+
+    pub fn prewarm_raw_txs(&self) -> Result<usize, bdk::Error> {
+        use bdk::database::Database;
+
+        Ok(Database::iter_txs(self, true)?.len())
+    }
+
     fn script_pubkeys_repo(&self) -> ScriptPubkeys {
         ScriptPubkeys::new(self.ctx.keychain_id, self.ctx.pool.clone())
     }
@@ -141,7 +153,7 @@ mod tests {
         let details = tx_details(txid);
 
         cache
-            .insert_tx(txid, details.clone())
+            .extend_txs([(txid, details.clone())])
             .expect("insert should succeed");
         let loaded = cache.get_tx(&txid).expect("get should succeed");
         assert_eq!(loaded, Some(details));
@@ -236,7 +248,7 @@ mod tests {
         let txid = Txid::all_zeros();
 
         cache
-            .insert_tx(txid, tx_details(txid))
+            .extend_txs([(txid, tx_details(txid))])
             .expect("insert should succeed");
 
         let txs = cache.all_txs().expect("all_txs should succeed");
@@ -260,7 +272,7 @@ mod tests {
         existing.transaction = Some(raw_tx.clone());
         existing.received = 1;
         cache
-            .insert_tx(txid, existing)
+            .extend_txs([(txid, existing)])
             .expect("insert should succeed");
 
         let mut summary = tx_details(txid);
@@ -291,6 +303,32 @@ mod tests {
                 timestamp: 123,
             })
         );
+    }
+
+    #[test]
+    fn wallet_cache_extend_txs_clears_pending_lookup_entries() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .enqueue_pending_tx_lookup(txid)
+            .expect("enqueue should succeed");
+        let drained = cache
+            .drain_pending_tx_lookups(10)
+            .expect("drain should succeed");
+        assert_eq!(drained, vec![txid]);
+
+        cache
+            .requeue_pending_tx_lookups(vec![txid])
+            .expect("requeue should succeed");
+        cache
+            .extend_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+
+        let drained_after_insert = cache
+            .drain_pending_tx_lookups(10)
+            .expect("drain should succeed");
+        assert!(drained_after_insert.is_empty());
     }
 
     #[test]

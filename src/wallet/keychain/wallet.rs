@@ -52,6 +52,7 @@ impl Default for SyncProgressContext {
 
 const PROGRESS_BUCKET_SIZE_PCT: u8 = 10;
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const TX_PREWARM_THRESHOLD: i64 = 5_000;
 
 const fn completion_bucket() -> u8 {
     100 / PROGRESS_BUCKET_SIZE_PCT
@@ -145,6 +146,10 @@ fn should_emit_progress(
     }
 
     elapsed_since_last_emit >= PROGRESS_HEARTBEAT_INTERVAL
+}
+
+fn should_prewarm_raw_txs(tx_count: i64) -> bool {
+    tx_count >= TX_PREWARM_THRESHOLD
 }
 
 impl KeychainWallet {
@@ -244,6 +249,18 @@ impl KeychainWallet {
             let max_last_index = last_external.max(last_internal);
 
             let _ = wallet.ensure_addresses_cached(max_last_index.saturating_add(1))?;
+
+            let tx_count = wallet.database().tx_count()?;
+            if should_prewarm_raw_txs(tx_count) {
+                let prewarmed_txs = wallet.database().prewarm_raw_txs()?;
+                tracing::info!(
+                    tx_count,
+                    prewarmed_txs,
+                    threshold = TX_PREWARM_THRESHOLD,
+                    "prewarmed raw tx cache before wallet sync"
+                );
+            }
+
             let progress = TracingBdkProgress::new(context, wallet_id, keychain_id);
             wallet.sync(
                 &blockchain,
@@ -344,5 +361,11 @@ mod tests {
             100.0,
             Duration::from_secs(1)
         ));
+    }
+
+    #[test]
+    fn prewarm_enabled_for_large_wallets_only() {
+        assert!(!should_prewarm_raw_txs(4_999));
+        assert!(should_prewarm_raw_txs(5_000));
     }
 }
