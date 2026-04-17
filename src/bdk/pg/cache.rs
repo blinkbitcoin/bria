@@ -5,7 +5,7 @@ use bdk::{
 use std::{
     collections::{HashMap, HashSet},
     sync::atomic::{AtomicBool, AtomicU8, Ordering},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use super::{ScriptPubkeyCache, SqlxWalletDb, TransactionCache};
@@ -30,6 +30,14 @@ pub(super) struct WalletCache {
 }
 
 impl WalletCache {
+    fn clear_even_if_poisoned<T>(mutex: &Mutex<T>)
+    where
+        T: Default,
+    {
+        let mut guard = mutex.lock().unwrap_or_else(PoisonError::into_inner);
+        *guard = T::default();
+    }
+
     pub(super) fn new() -> Self {
         Self {
             script_pubkeys: Arc::new(Mutex::new(HashMap::new())),
@@ -344,24 +352,12 @@ impl WalletCache {
     }
 
     pub(super) fn invalidate(&self) {
-        if let Ok(mut g) = self.script_pubkeys.lock() {
-            g.clear();
-        }
-        if let Ok(mut g) = self.transactions.lock() {
-            g.clear();
-        }
-        if let Ok(mut g) = self.missing_script_pubkeys.lock() {
-            g.clear();
-        }
-        if let Ok(mut g) = self.missing_txids.lock() {
-            g.clear();
-        }
-        if let Ok(mut g) = self.pending_script_misses.lock() {
-            g.clear();
-        }
-        if let Ok(mut g) = self.pending_tx_misses.lock() {
-            g.clear();
-        }
+        Self::clear_even_if_poisoned(&self.script_pubkeys);
+        Self::clear_even_if_poisoned(&self.transactions);
+        Self::clear_even_if_poisoned(&self.missing_script_pubkeys);
+        Self::clear_even_if_poisoned(&self.missing_txids);
+        Self::clear_even_if_poisoned(&self.pending_script_misses);
+        Self::clear_even_if_poisoned(&self.pending_tx_misses);
 
         self.script_pubkeys_loaded_mask.store(0, Ordering::Release);
         self.raw_txs_fully_loaded.store(false, Ordering::Release);
