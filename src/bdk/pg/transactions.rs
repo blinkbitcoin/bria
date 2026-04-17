@@ -262,9 +262,16 @@ impl Transactions {
 
             let mut batch_rows = 0usize;
             while let Some(row) = Self::next_stream_row(&mut stream).await? {
+                let txid = Self::parse_txid(&row.tx_id)?;
                 let details = Self::deserialize_details(row.details_json)?;
+                if txid != details.txid {
+                    return Err(bdk::Error::Generic(format!(
+                        "mismatched tx ids in bdk_transactions: tx_id column {} != details_json txid {}",
+                        txid, details.txid
+                    )));
+                }
                 Self::record_loaded_row(&mut last_tx_id, &mut count, &mut batch_rows, row.tx_id);
-                out.insert(details.txid, details);
+                out.insert(txid, details);
             }
 
             if batch_rows == 0 {
