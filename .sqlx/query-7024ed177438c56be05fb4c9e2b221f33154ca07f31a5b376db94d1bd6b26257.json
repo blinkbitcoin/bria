@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT script, keychain_kind as \"keychain_kind: BdkKeychainKind\", path FROM bdk_script_pubkeys\n                WHERE keychain_id = $1",
+  "query": "SELECT script, keychain_kind as \"keychain_kind: BdkKeychainKind\", path\n            FROM bdk_script_pubkeys\n            WHERE keychain_id = $1 AND script_hex = ANY($2)",
   "describe": {
     "columns": [
       {
@@ -31,7 +31,8 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "TextArray"
       ]
     },
     "nullable": [
@@ -40,5 +41,5 @@
       false
     ]
   },
-  "hash": "846df15d0a9709ad69c5ff8e6c3e6679816cf5c9f86ea2b4a9d1b95458ec56a1"
+  "hash": "7024ed177438c56be05fb4c9e2b221f33154ca07f31a5b376db94d1bd6b26257"
 }

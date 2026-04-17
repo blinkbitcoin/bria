@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT tx_id, details_json\n              FROM bdk_transactions\n             WHERE keychain_id = $1\n               AND deleted_at IS NULL\n                AND ($2::TEXT IS NULL OR tx_id > $2)\n             ORDER BY tx_id ASC\n             LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tx_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "details_json",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "68df480b792fa014a5d66aa05f2d7caa1305d81382f32f2b55c36d31fa8e3583"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT script, keychain_kind as \"keychain_kind: BdkKeychainKind\", path FROM bdk_script_pubkeys\n                WHERE keychain_id = $1 AND keychain_kind = $2",
+  "query": "SELECT script, keychain_kind as \"keychain_kind: BdkKeychainKind\", path\n                FROM bdk_script_pubkeys\n                WHERE keychain_id = $1\n                  AND keychain_kind = $2\n                  AND ($3::INT4 IS NULL OR path > $3)\n                ORDER BY path ASC\n                LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -42,7 +42,9 @@
               ]
             }
           }
-        }
+        },
+        "Int4",
+        "Int8"
       ]
     },
     "nullable": [
@@ -51,5 +53,5 @@
       false
     ]
   },
-  "hash": "a49bfbc8c8ca875c146ac678f5f5633b758af6a7070b939032394b6525d4a7c3"
+  "hash": "de37549b14b9fd94158abdabeb2f5ed88144d562a5eae47e8a3f1e9d16e7c92a"
 }
