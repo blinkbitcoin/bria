@@ -343,7 +343,9 @@ mod tests {
         assert!(cache
             .txid_marked_missing(&txid)
             .expect("lookup should succeed"));
-        assert!(cache.should_batch_resolve_tx_misses(1));
+        assert!(cache
+            .should_batch_resolve_tx_misses(1)
+            .expect("threshold check should succeed"));
 
         let drained = cache
             .drain_pending_tx_misses(1)
@@ -373,7 +375,9 @@ mod tests {
         assert!(cache
             .script_marked_missing(first.as_script())
             .expect("lookup should succeed"));
-        assert!(cache.should_batch_resolve_script_misses(1));
+        assert!(cache
+            .should_batch_resolve_script_misses(1)
+            .expect("threshold check should succeed"));
 
         let drained = cache
             .drain_pending_script_misses(1)

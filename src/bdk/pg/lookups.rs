@@ -31,7 +31,7 @@ impl SqlxWalletDb {
     fn resolve_pending_script_misses(&self) -> Result<(), bdk::Error> {
         if !self
             .cache
-            .should_batch_resolve_script_misses(self.miss_resolution.threshold)
+            .should_batch_resolve_script_misses(self.miss_resolution.threshold)?
         {
             return Ok(());
         }
@@ -57,14 +57,13 @@ impl SqlxWalletDb {
             )?;
         }
 
-        self.cache.reset_script_miss_counter();
         Ok(())
     }
 
     fn resolve_pending_tx_misses(&self) -> Result<(), bdk::Error> {
         if !self
             .cache
-            .should_batch_resolve_tx_misses(self.miss_resolution.threshold)
+            .should_batch_resolve_tx_misses(self.miss_resolution.threshold)?
         {
             return Ok(());
         }
@@ -85,7 +84,6 @@ impl SqlxWalletDb {
             self.cache.extend_txs(found)?;
         }
 
-        self.cache.reset_tx_miss_counter();
         Ok(())
     }
 

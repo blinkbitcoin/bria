@@ -4,7 +4,7 @@ use bdk::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -27,8 +27,6 @@ pub(super) struct WalletCache {
     raw_txs_fully_loaded: Arc<AtomicBool>,
     // Process-local hint: true means summary tx details were fully hydrated once.
     summary_txs_fully_loaded: Arc<AtomicBool>,
-    raw_tx_lookup_miss_count: Arc<AtomicUsize>,
-    script_lookup_miss_count: Arc<AtomicUsize>,
 }
 
 impl WalletCache {
@@ -43,8 +41,6 @@ impl WalletCache {
             script_pubkeys_loaded_mask: Arc::new(AtomicU8::new(0)),
             raw_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
             summary_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
-            raw_tx_lookup_miss_count: Arc::new(AtomicUsize::new(0)),
-            script_lookup_miss_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -280,7 +276,6 @@ impl WalletCache {
     pub(super) fn mark_script_missing(&self, script: ScriptBuf) -> Result<(), bdk::Error> {
         self.lock_missing_script_pubkeys()?.insert(script.clone());
         self.lock_pending_script_misses()?.insert(script);
-        self.script_lookup_miss_count.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -310,7 +305,6 @@ impl WalletCache {
     pub(super) fn mark_txid_missing(&self, txid: Txid) -> Result<(), bdk::Error> {
         self.lock_missing_txids()?.insert(txid);
         self.lock_pending_tx_misses()?.insert(txid);
-        self.raw_tx_lookup_miss_count.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -329,19 +323,45 @@ impl WalletCache {
         Ok(drained)
     }
 
-    pub(super) fn should_batch_resolve_script_misses(&self, threshold: usize) -> bool {
-        self.script_lookup_miss_count.load(Ordering::Acquire) >= threshold
+    pub(super) fn should_batch_resolve_script_misses(
+        &self,
+        threshold: usize,
+    ) -> Result<bool, bdk::Error> {
+        let pending = self.lock_pending_script_misses()?;
+        Ok(pending.len() >= threshold)
     }
 
-    pub(super) fn should_batch_resolve_tx_misses(&self, threshold: usize) -> bool {
-        self.raw_tx_lookup_miss_count.load(Ordering::Acquire) >= threshold
+    pub(super) fn should_batch_resolve_tx_misses(
+        &self,
+        threshold: usize,
+    ) -> Result<bool, bdk::Error> {
+        let pending = self.lock_pending_tx_misses()?;
+        Ok(pending.len() >= threshold)
     }
 
-    pub(super) fn reset_script_miss_counter(&self) {
-        self.script_lookup_miss_count.store(0, Ordering::Release);
-    }
+    pub(super) fn invalidate(&self) {
+        if let Ok(mut g) = self.script_pubkeys.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.transactions.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.missing_script_pubkeys.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.missing_txids.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.pending_script_misses.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.pending_tx_misses.lock() {
+            g.clear();
+        }
 
-    pub(super) fn reset_tx_miss_counter(&self) {
-        self.raw_tx_lookup_miss_count.store(0, Ordering::Release);
+        self.script_pubkeys_loaded_mask.store(0, Ordering::Release);
+        self.raw_txs_fully_loaded.store(false, Ordering::Release);
+        self.summary_txs_fully_loaded
+            .store(false, Ordering::Release);
     }
 }

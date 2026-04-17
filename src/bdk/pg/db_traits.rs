@@ -98,8 +98,9 @@ impl BatchOperations for SqlxWalletDb {
             .rt
             .block_on(async { self.transactions_repo().delete(tx_id).await })?;
 
+        self.batch.txs.remove(tx_id);
+
         if deleted.is_some() {
-            self.batch.txs.remove(tx_id);
             self.cache.remove_tx(tx_id)?;
         }
 
@@ -364,8 +365,27 @@ impl BatchDatabase for SqlxWalletDb {
             Ok::<_, bdk::Error>(())
         })?;
 
-        self.cache.extend_script_pubkeys(addresses_for_cache)?;
-        self.cache.extend_txs(txs_for_cache)?;
+        let mut cache_degraded = false;
+        if let Err(error) = self.cache.extend_script_pubkeys(addresses_for_cache) {
+            tracing::warn!(
+                phase = "script_pubkeys",
+                error = %error,
+                "cache update failed after successful commit; invalidating cache"
+            );
+            cache_degraded = true;
+        }
+        if let Err(error) = self.cache.extend_txs(txs_for_cache) {
+            tracing::warn!(
+                phase = "txs",
+                error = %error,
+                "cache update failed after successful commit; invalidating cache"
+            );
+            cache_degraded = true;
+        }
+        if cache_degraded {
+            self.cache.invalidate();
+        }
+
         Ok(())
     }
 }

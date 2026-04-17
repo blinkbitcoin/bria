@@ -243,13 +243,11 @@ impl ScriptPubkeys {
             self.list_scripts_with_paths_for_keychain(keychain_kind)
                 .await
         } else {
-            let mut all = self
-                .list_scripts_with_paths_for_keychain(BdkKeychainKind::External)
-                .await?;
-            all.extend(
-                self.list_scripts_with_paths_for_keychain(BdkKeychainKind::Internal)
-                    .await?,
-            );
+            let (mut all, internal) = tokio::try_join!(
+                self.list_scripts_with_paths_for_keychain(BdkKeychainKind::External),
+                self.list_scripts_with_paths_for_keychain(BdkKeychainKind::Internal),
+            )?;
+            all.extend(internal);
             Ok(all)
         }
     }
