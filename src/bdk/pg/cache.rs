@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use super::{ScriptPubkeyCache, TransactionCache};
+use super::{ScriptPubkeyCache, SqlxWalletDb, TransactionCache};
 
 #[derive(Clone)]
 pub(super) struct WalletCache {
@@ -88,17 +88,6 @@ impl WalletCache {
 
     fn lock_pending_tx_misses(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
         self.lock_with_error(&self.pending_tx_misses, "pending tx misses cache")
-    }
-
-    fn summary_tx_from_ref(tx: &TransactionDetails) -> TransactionDetails {
-        TransactionDetails {
-            transaction: None,
-            txid: tx.txid,
-            received: tx.received,
-            sent: tx.sent,
-            fee: tx.fee,
-            confirmation_time: tx.confirmation_time.clone(),
-        }
     }
 
     pub(super) fn get_script_pubkey_path(
@@ -240,7 +229,7 @@ impl WalletCache {
         let cache = self.lock_transactions()?;
         Ok(cache
             .values()
-            .map(|tx| (tx.txid, Self::summary_tx_from_ref(tx)))
+            .map(|tx| (tx.txid, SqlxWalletDb::summary_tx_from_ref(tx)))
             .collect())
     }
 

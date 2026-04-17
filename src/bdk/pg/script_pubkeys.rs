@@ -50,41 +50,6 @@ impl ScriptPubkeys {
         Self { keychain_id, pool }
     }
 
-    #[instrument(name = "bdk.script_pubkeys.persist_all", skip_all)]
-    // Retained for non-transactional call sites and focused tests.
-    #[allow(dead_code)]
-    pub async fn persist_all(
-        &self,
-        keys: Vec<(BdkKeychainKind, u32, ScriptBuf)>,
-    ) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 5000;
-        let chunks = keys.chunks(BATCH_SIZE);
-        for chunk in chunks {
-            let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
-                r#"INSERT INTO bdk_script_pubkeys
-        (keychain_id, keychain_kind, path, script, script_hex, script_fmt)"#,
-            );
-
-            query_builder.push_values(chunk, |mut builder, (keychain, path, script)| {
-                builder.push_bind(self.keychain_id);
-                builder.push_bind(keychain);
-                builder.push_bind(*path as i32);
-                builder.push_bind(script.as_bytes());
-                builder.push_bind(format!("{script:02x}"));
-                builder.push_bind(format!("{script:?}"));
-            });
-            query_builder.push("ON CONFLICT DO NOTHING");
-
-            query_builder
-                .build()
-                .execute(&self.pool)
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-        }
-
-        Ok(())
-    }
-
     pub async fn persist_all_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,

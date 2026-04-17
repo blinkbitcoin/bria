@@ -186,13 +186,16 @@ impl SqlxWalletDb {
             .rt
             .block_on(async { self.transactions_repo().find_by_id(txid).await })?;
 
-        // DB rows represent persisted TransactionDetails; this store does not persist a
-        // "summary-only" transaction format. A DB hit is therefore valid for both lookup
-        // modes (`Any` and `RequireRaw`).
+        // DB rows represent persisted TransactionDetails. In `RequireRaw` mode, a summary-only
+        // row is a mode miss (not an existence miss).
 
         if let Some(tx) = &found {
             self.cache.insert_tx(tx.txid, tx.clone())?;
-            Ok((found, "db_hit"))
+            if Self::tx_matches_lookup_mode(tx, mode) {
+                Ok((found, "db_hit"))
+            } else {
+                Ok((None, "db_mode_miss"))
+            }
         } else {
             self.cache.mark_txid_missing(*txid)?;
             Ok((None, "db_miss"))
