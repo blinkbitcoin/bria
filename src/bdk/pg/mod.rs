@@ -360,6 +360,7 @@ impl SqlxWalletDb {
 }
 
 impl BatchOperations for SqlxWalletDb {
+    #[tracing::instrument(name = "bdk.batch.set_script_pubkey", skip_all, err)]
     fn set_script_pubkey(
         &mut self,
         script: &Script,
@@ -370,20 +371,24 @@ impl BatchOperations for SqlxWalletDb {
         Ok(())
     }
 
+    #[tracing::instrument(name = "bdk.batch.set_utxo", skip_all, err)]
     fn set_utxo(&mut self, utxo: &LocalUtxo) -> Result<(), bdk::Error> {
         self.batch.utxos.push(utxo.clone());
         Ok(())
     }
 
+    #[tracing::instrument(name = "bdk.batch.set_raw_tx", skip_all, err)]
     fn set_raw_tx(&mut self, _: &Transaction) -> Result<(), bdk::Error> {
         Err(Self::unsupported_operation("set_raw_tx"))
     }
 
+    #[tracing::instrument(name = "bdk.batch.set_tx", skip_all, err)]
     fn set_tx(&mut self, tx: &TransactionDetails) -> Result<(), bdk::Error> {
         self.batch.txs.insert(tx.txid, tx.clone());
         Ok(())
     }
 
+    #[tracing::instrument(name = "bdk.batch.set_last_index", skip_all, err)]
     fn set_last_index(&mut self, kind: KeychainKind, idx: u32) -> Result<(), bdk::Error> {
         // NOTE: This write is intentionally immediate because BDK may call it outside of
         // `commit_batch` flow.
@@ -392,6 +397,7 @@ impl BatchOperations for SqlxWalletDb {
             .block_on(async { self.indexes_repo().persist_last_index(kind, idx).await })
     }
 
+    #[tracing::instrument(name = "bdk.batch.set_sync_time", skip_all, err)]
     fn set_sync_time(&mut self, time: SyncTime) -> Result<(), bdk::Error> {
         // NOTE: This write is intentionally immediate because BDK may call it outside of
         // `commit_batch` flow.
@@ -400,6 +406,7 @@ impl BatchOperations for SqlxWalletDb {
             .block_on(async { self.sync_times_repo().persist(time).await })
     }
 
+    #[tracing::instrument(name = "bdk.batch.del_script_pubkey_from_path", skip_all, err)]
     fn del_script_pubkey_from_path(
         &mut self,
         _: KeychainKind,
@@ -407,21 +414,28 @@ impl BatchOperations for SqlxWalletDb {
     ) -> Result<Option<ScriptBuf>, bdk::Error> {
         Err(Self::unsupported_operation("del_script_pubkey_from_path"))
     }
+
+    #[tracing::instrument(name = "bdk.batch.del_path_from_script_pubkey", skip_all, err)]
     fn del_path_from_script_pubkey(
         &mut self,
         _: &Script,
     ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
         Err(Self::unsupported_operation("del_path_from_script_pubkey"))
     }
+
+    #[tracing::instrument(name = "bdk.batch.del_utxo", skip_all, err)]
     fn del_utxo(&mut self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
         self.ctx
             .rt
             .block_on(async { self.utxos_repo().delete(outpoint).await })
     }
+
+    #[tracing::instrument(name = "bdk.batch.del_raw_tx", skip_all, err)]
     fn del_raw_tx(&mut self, _: &Txid) -> Result<Option<Transaction>, bdk::Error> {
         Err(Self::unsupported_operation("del_raw_tx"))
     }
 
+    #[tracing::instrument(name = "bdk.batch.del_tx", skip_all, err)]
     fn del_tx(
         &mut self,
         tx_id: &Txid,
@@ -439,15 +453,20 @@ impl BatchOperations for SqlxWalletDb {
 
         Ok(deleted)
     }
+
+    #[tracing::instrument(name = "bdk.batch.del_last_index", skip_all, err)]
     fn del_last_index(&mut self, _: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
         Err(Self::unsupported_operation("del_last_index"))
     }
+
+    #[tracing::instrument(name = "bdk.batch.del_sync_time", skip_all, err)]
     fn del_sync_time(&mut self) -> Result<Option<SyncTime>, bdk::Error> {
         Err(Self::unsupported_operation("del_sync_time"))
     }
 }
 
 impl Database for SqlxWalletDb {
+    #[tracing::instrument(name = "bdk.db.check_descriptor_checksum", skip_all, err)]
     fn check_descriptor_checksum<B>(
         &mut self,
         keychain: KeychainKind,
@@ -465,6 +484,8 @@ impl Database for SqlxWalletDb {
             Ok(())
         })
     }
+
+    #[tracing::instrument(name = "bdk.db.iter_script_pubkeys", skip_all, err)]
     fn iter_script_pubkeys(
         &self,
         keychain: Option<KeychainKind>,
@@ -491,15 +512,20 @@ impl Database for SqlxWalletDb {
             .map(|(script, _)| script)
             .collect())
     }
+
+    #[tracing::instrument(name = "bdk.db.iter_utxos", skip_all, err)]
     fn iter_utxos(&self) -> Result<Vec<LocalUtxo>, bdk::Error> {
         self.ctx
             .rt
             .block_on(async { self.utxos_repo().list_local_utxos().await })
     }
+
+    #[tracing::instrument(name = "bdk.db.iter_raw_txs", skip_all, err)]
     fn iter_raw_txs(&self) -> Result<Vec<Transaction>, bdk::Error> {
         Err(Self::unsupported_operation("iter_raw_txs"))
     }
 
+    #[tracing::instrument(name = "bdk.db.iter_txs", skip_all, err)]
     fn iter_txs(&self, include_raw: bool) -> Result<Vec<TransactionDetails>, bdk::Error> {
         let txs = match (include_raw, self.cache.raw_txs_fully_loaded()) {
             (true, true) => self
@@ -540,6 +566,7 @@ impl Database for SqlxWalletDb {
             .collect())
     }
 
+    #[tracing::instrument(name = "bdk.db.get_script_pubkey_from_path", skip_all, err)]
     fn get_script_pubkey_from_path(
         &self,
         keychain: KeychainKind,
@@ -549,21 +576,29 @@ impl Database for SqlxWalletDb {
             .rt
             .block_on(async { self.script_pubkeys_repo().find_script(keychain, path).await })
     }
+
+    #[tracing::instrument(name = "bdk.db.get_path_from_script_pubkey", skip_all, err)]
     fn get_path_from_script_pubkey(
         &self,
         script: &Script,
     ) -> Result<Option<(KeychainKind, u32)>, bdk::Error> {
         self.lookup_script_pubkey_path(script)
     }
+
+    #[tracing::instrument(name = "bdk.db.get_utxo", skip_all, err)]
     fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<LocalUtxo>, bdk::Error> {
         self.ctx
             .rt
             .block_on(async { self.utxos_repo().find(outpoint).await })
     }
+
+    #[tracing::instrument(name = "bdk.db.get_raw_tx", skip_all, err)]
     fn get_raw_tx(&self, tx_id: &Txid) -> Result<Option<Transaction>, bdk::Error> {
         self.lookup_tx_with_mode(tx_id, TxLookupMode::RequireRaw)
             .map(|tx| tx.and_then(|tx| tx.transaction))
     }
+
+    #[tracing::instrument(name = "bdk.db.get_tx", skip_all, err)]
     fn get_tx(
         &self,
         tx_id: &Txid,
@@ -578,16 +613,22 @@ impl Database for SqlxWalletDb {
             })
         })
     }
+
+    #[tracing::instrument(name = "bdk.db.get_last_index", skip_all, err)]
     fn get_last_index(&self, kind: KeychainKind) -> Result<std::option::Option<u32>, bdk::Error> {
         self.ctx
             .rt
             .block_on(async { self.indexes_repo().get_latest(kind).await })
     }
+
+    #[tracing::instrument(name = "bdk.db.get_sync_time", skip_all, err)]
     fn get_sync_time(&self) -> Result<Option<SyncTime>, bdk::Error> {
         self.ctx
             .rt
             .block_on(async { self.sync_times_repo().get().await })
     }
+
+    #[tracing::instrument(name = "bdk.db.increment_last_index", skip_all, err)]
     fn increment_last_index(&mut self, keychain: KeychainKind) -> Result<u32, bdk::Error> {
         self.ctx
             .rt
