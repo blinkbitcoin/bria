@@ -36,6 +36,7 @@ impl WalletCache {
     {
         let mut guard = mutex.lock().unwrap_or_else(PoisonError::into_inner);
         *guard = T::default();
+        mutex.clear_poison();
     }
 
     pub(super) fn new() -> Self {
