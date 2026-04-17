@@ -4,7 +4,10 @@ use bdk::{
     KeychainKind, LocalUtxo, TransactionDetails,
 };
 
-use super::{convert::BdkKeychainKind, *};
+use super::{
+    convert::BdkKeychainKind, lookups::TxLookupMode, ScriptPubkeys, SqlxWalletDb, Transactions,
+    Utxos, WalletBatchState,
+};
 
 impl BatchOperations for SqlxWalletDb {
     #[tracing::instrument(name = "bdk.batch.set_script_pubkey", skip_all, err)]
@@ -298,6 +301,7 @@ impl BatchDatabase for SqlxWalletDb {
             ctx: self.ctx.clone(),
             cache: self.cache.clone(),
             batch: WalletBatchState::default(),
+            miss_resolution: self.miss_resolution,
         }
     }
 
