@@ -338,10 +338,14 @@ impl WalletCache {
         Ok(())
     }
 
-    pub(super) fn record_and_enqueue_missing_txid(&self, txid: Txid) -> Result<(), bdk::Error> {
-        self.lock_missing_txids()?.insert(txid);
+    pub(super) fn enqueue_pending_tx_miss(&self, txid: Txid) -> Result<(), bdk::Error> {
         self.lock_pending_tx_misses()?.insert(txid);
         Ok(())
+    }
+
+    pub(super) fn pending_tx_miss_queued(&self, txid: &Txid) -> Result<bool, bdk::Error> {
+        let pending = self.lock_pending_tx_misses()?;
+        Ok(pending.contains(txid))
     }
 
     pub(super) fn mark_txid_not_missing(&self, txid: &Txid) -> Result<(), bdk::Error> {
@@ -365,6 +369,26 @@ impl WalletCache {
         Ok(drained)
     }
 
+    pub(super) fn drain_pending_tx_lookups_including(
+        &self,
+        required_txid: Txid,
+        max: usize,
+    ) -> Result<Vec<Txid>, bdk::Error> {
+        let mut pending = self.lock_pending_tx_lookups()?;
+        let mut drained = Vec::with_capacity(max.max(1));
+        drained.push(required_txid);
+        pending.remove(&required_txid);
+
+        let additional = max.max(1).saturating_sub(1);
+        let rest: Vec<_> = pending.iter().take(additional).copied().collect();
+        for txid in &rest {
+            pending.remove(txid);
+        }
+        drained.extend(rest);
+
+        Ok(drained)
+    }
+
     pub(super) fn requeue_pending_tx_lookups<I>(&self, txids: I) -> Result<(), bdk::Error>
     where
         I: IntoIterator<Item = Txid>,
@@ -380,6 +404,26 @@ impl WalletCache {
         for txid in &drained {
             pending.remove(txid);
         }
+        Ok(drained)
+    }
+
+    pub(super) fn drain_pending_tx_misses_including(
+        &self,
+        required_txid: Txid,
+        max: usize,
+    ) -> Result<Vec<Txid>, bdk::Error> {
+        let mut pending = self.lock_pending_tx_misses()?;
+        let mut drained = Vec::with_capacity(max.max(1));
+        drained.push(required_txid);
+        pending.remove(&required_txid);
+
+        let additional = max.max(1).saturating_sub(1);
+        let rest: Vec<_> = pending.iter().take(additional).copied().collect();
+        for txid in &rest {
+            pending.remove(txid);
+        }
+        drained.extend(rest);
+
         Ok(drained)
     }
 

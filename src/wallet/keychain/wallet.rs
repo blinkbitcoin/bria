@@ -52,7 +52,7 @@ impl Default for SyncProgressContext {
 
 const PROGRESS_BUCKET_SIZE_PCT: u8 = 10;
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-const TX_PREWARM_THRESHOLD: i64 = 5_000;
+const TX_PREWARM_THRESHOLD: i64 = 1_000;
 
 const fn completion_bucket() -> u8 {
     100 / PROGRESS_BUCKET_SIZE_PCT
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn prewarm_enabled_for_large_wallets_only() {
-        assert!(!should_prewarm_raw_txs(4_999));
-        assert!(should_prewarm_raw_txs(5_000));
+        assert!(!should_prewarm_raw_txs(999));
+        assert!(should_prewarm_raw_txs(1_000));
     }
 }

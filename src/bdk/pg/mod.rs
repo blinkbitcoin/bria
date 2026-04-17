@@ -332,6 +332,60 @@ mod tests {
     }
 
     #[test]
+    fn wallet_cache_forced_lookup_drain_includes_requested_txid() {
+        let cache = WalletCache::new();
+        let required = Txid::all_zeros();
+        let first = Txid::from_slice(&[1; 32]).expect("valid txid");
+        let second = Txid::from_slice(&[2; 32]).expect("valid txid");
+
+        cache
+            .enqueue_pending_tx_lookup(first)
+            .expect("enqueue should succeed");
+        cache
+            .enqueue_pending_tx_lookup(second)
+            .expect("enqueue should succeed");
+
+        let drained = cache
+            .drain_pending_tx_lookups_including(required, 2)
+            .expect("forced drain should succeed");
+        assert_eq!(drained[0], required);
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(&first) || drained.contains(&second));
+
+        let remaining = cache
+            .drain_pending_tx_lookups(10)
+            .expect("drain should succeed");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn wallet_cache_forced_tx_miss_drain_includes_requested_txid() {
+        let cache = WalletCache::new();
+        let required = Txid::all_zeros();
+        let first = Txid::from_slice(&[1; 32]).expect("valid txid");
+        let second = Txid::from_slice(&[2; 32]).expect("valid txid");
+
+        cache
+            .enqueue_pending_tx_miss(first)
+            .expect("enqueue should succeed");
+        cache
+            .enqueue_pending_tx_miss(second)
+            .expect("enqueue should succeed");
+
+        let drained = cache
+            .drain_pending_tx_misses_including(required, 2)
+            .expect("forced drain should succeed");
+        assert_eq!(drained[0], required);
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(&first) || drained.contains(&second));
+
+        let remaining = cache
+            .drain_pending_tx_misses(10)
+            .expect("drain should succeed");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
     fn cache_loaded_script_pubkeys_marks_mask_and_populates_paths() {
         let cache = WalletCache::new();
         let external_script = ScriptBuf::from(vec![0x51]);
@@ -375,11 +429,17 @@ mod tests {
         let another = Txid::from_slice(&[1; 32]).expect("valid txid");
 
         cache
-            .record_and_enqueue_missing_txid(txid)
+            .record_missing_txid(txid)
             .expect("mark should succeed");
         cache
-            .record_and_enqueue_missing_txid(another)
+            .enqueue_pending_tx_miss(txid)
+            .expect("enqueue should succeed");
+        cache
+            .record_missing_txid(another)
             .expect("mark should succeed");
+        cache
+            .enqueue_pending_tx_miss(another)
+            .expect("enqueue should succeed");
         assert!(cache
             .txid_marked_missing(&txid)
             .expect("lookup should succeed"));
@@ -438,8 +498,11 @@ mod tests {
         let txid = Txid::all_zeros();
 
         cache
-            .record_and_enqueue_missing_txid(txid)
+            .record_missing_txid(txid)
             .expect("mark should succeed");
+        cache
+            .enqueue_pending_tx_miss(txid)
+            .expect("enqueue should succeed");
         assert!(cache
             .txid_marked_missing(&txid)
             .expect("lookup should succeed"));
