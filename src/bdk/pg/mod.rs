@@ -299,6 +299,11 @@ impl SqlxWalletDb {
             return Ok(Some(path));
         }
 
+        // Once both keychains are fully hydrated in this process, a cache miss is definitive.
+        if self.cache.script_pubkeys_fully_loaded(None) {
+            return Ok(None);
+        }
+
         let script_pubkey = script.to_owned();
         let found = self
             .ctx
@@ -335,6 +340,11 @@ impl SqlxWalletDb {
             if self.cache.raw_txs_fully_loaded() {
                 return Ok(None);
             }
+        }
+
+        // Once raw txs are fully loaded in this process, a miss is definitive.
+        if self.cache.raw_txs_fully_loaded() {
+            return Ok(None);
         }
 
         let found = self
