@@ -1,3 +1,10 @@
+# [bria release v0.1.137](https://github.com/blinkbitcoin/bria/releases/tag/0.1.137)
+
+
+### Performance
+
+- Harden pg wallet cache and large-wallet sync paths (#59)
+
 # [bria release v0.1.136](https://github.com/blinkbitcoin/bria/releases/tag/0.1.136)
 
 
