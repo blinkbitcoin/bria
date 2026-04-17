@@ -15,6 +15,8 @@ pub struct ScriptPubkeys {
 }
 
 impl ScriptPubkeys {
+    const LIST_WITH_PATHS_BATCH_SIZE: i64 = 10_000;
+
     fn script_with_path(
         script: Vec<u8>,
         keychain_kind: BdkKeychainKind,
@@ -220,37 +222,61 @@ impl ScriptPubkeys {
         &self,
         keychain: Option<impl Into<BdkKeychainKind>>,
     ) -> Result<Vec<ScriptWithPath>, bdk::Error> {
-        let keychain_id = Uuid::from(self.keychain_id);
         let keychain_kind: Option<BdkKeychainKind> = keychain.map(Into::into);
         if let Some(keychain_kind) = keychain_kind {
-            let rows = sqlx::query!(
-                r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind", path FROM bdk_script_pubkeys
-                WHERE keychain_id = $1 AND keychain_kind = $2"#,
-                keychain_id,
-                keychain_kind as BdkKeychainKind,
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-
-            Ok(rows
-                .into_iter()
-                .map(|row| Self::script_with_path(row.script, row.keychain_kind, row.path))
-                .collect::<Result<Vec<_>, _>>()?)
+            self.list_scripts_with_paths_for_keychain(keychain_kind)
+                .await
         } else {
-            let rows = sqlx::query!(
-                r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind", path FROM bdk_script_pubkeys
-                WHERE keychain_id = $1"#,
-                keychain_id,
+            let mut all = self
+                .list_scripts_with_paths_for_keychain(BdkKeychainKind::External)
+                .await?;
+            all.extend(
+                self.list_scripts_with_paths_for_keychain(BdkKeychainKind::Internal)
+                    .await?,
+            );
+            Ok(all)
+        }
+    }
+
+    async fn list_scripts_with_paths_for_keychain(
+        &self,
+        keychain_kind: BdkKeychainKind,
+    ) -> Result<Vec<ScriptWithPath>, bdk::Error> {
+        let keychain_id = Uuid::from(self.keychain_id);
+        let mut last_path: Option<i32> = None;
+        let mut all = Vec::new();
+
+        loop {
+            let rows = sqlx::query(
+                r#"SELECT script, keychain_kind, path
+                FROM bdk_script_pubkeys
+                WHERE keychain_id = $1
+                  AND keychain_kind = $2
+                  AND ($3::INT4 IS NULL OR path > $3)
+                ORDER BY path ASC
+                LIMIT $4"#,
             )
+            .bind(keychain_id)
+            .bind(keychain_kind)
+            .bind(last_path)
+            .bind(Self::LIST_WITH_PATHS_BATCH_SIZE)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-            Ok(rows
-                .into_iter()
-                .map(|row| Self::script_with_path(row.script, row.keychain_kind, row.path))
-                .collect::<Result<Vec<_>, _>>()?)
+            if rows.is_empty() {
+                break;
+            }
+
+            for row in rows {
+                let path: i32 = row.get("path");
+                let script: Vec<u8> = row.get("script");
+                let keychain_kind: BdkKeychainKind = row.get("keychain_kind");
+                last_path = Some(path);
+                all.push(Self::script_with_path(script, keychain_kind, path)?);
+            }
         }
+
+        Ok(all)
     }
 }
