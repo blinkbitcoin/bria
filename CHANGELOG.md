@@ -1,3 +1,10 @@
+# [bria release v0.1.136](https://github.com/blinkbitcoin/bria/releases/tag/0.1.136)
+
+
+### Performance
+
+- Reduce wallet sync lookup churn and add tracing (#58)
+
 # [bria release v0.1.135](https://github.com/blinkbitcoin/bria/releases/tag/0.1.135)
 
 
