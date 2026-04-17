@@ -261,7 +261,11 @@ impl Database for SqlxWalletDb {
         tx_id: &Txid,
         include_raw: bool,
     ) -> Result<Option<TransactionDetails>, bdk::Error> {
-        let (tx, source) = self.lookup_tx(tx_id)?;
+        let (tx, source) = if include_raw {
+            self.lookup_tx_with_mode(tx_id, TxLookupMode::RequireRaw)?
+        } else {
+            self.lookup_tx(tx_id)?
+        };
         tracing::Span::current().record("source", tracing::field::display(source));
         Ok(tx.map(|tx| {
             if include_raw {
@@ -291,6 +295,44 @@ impl Database for SqlxWalletDb {
         self.ctx
             .rt
             .block_on(async { self.indexes_repo().increment(keychain).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bdk::bitcoin::hashes::Hash;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn tx_details(txid: Txid) -> TransactionDetails {
+        TransactionDetails {
+            transaction: None,
+            txid,
+            received: 0,
+            sent: 0,
+            fee: None,
+            confirmation_time: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_tx_include_raw_does_not_return_summary_only_cache_entry() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/test")
+            .expect("lazy pool should be created");
+        let db = SqlxWalletDb::new(pool, uuid::Uuid::nil().into());
+
+        let txid = Txid::all_zeros();
+        db.cache
+            .insert_tx(txid, tx_details(txid))
+            .expect("insert should succeed");
+        db.cache.set_raw_txs_fully_loaded();
+
+        let tx = Database::get_tx(&db, &txid, true).expect("get_tx should succeed");
+        assert!(tx.is_none());
+
+        let summary = Database::get_tx(&db, &txid, false).expect("get_tx should succeed");
+        assert_eq!(summary.map(|s| s.txid), Some(txid));
     }
 }
 

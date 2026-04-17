@@ -212,6 +212,8 @@ impl WalletCache {
     where
         I: IntoIterator<Item = (Txid, TransactionDetails)>,
     {
+        let entries: Vec<_> = entries.into_iter().collect();
+        self.clear_tx_miss_tracking(entries.iter().map(|(txid, _)| txid))?;
         let mut cache = self.lock_transactions()?;
         for (txid, mut summary) in entries {
             // Summary refreshes may run after raw tx bytes were already hydrated. Preserve any

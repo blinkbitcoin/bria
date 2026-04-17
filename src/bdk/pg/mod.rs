@@ -391,4 +391,27 @@ mod tests {
             .script_marked_missing(first.as_script())
             .expect("lookup should succeed"));
     }
+
+    #[test]
+    fn wallet_cache_extend_summary_txs_clears_tx_miss_tracking() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache.mark_txid_missing(txid).expect("mark should succeed");
+        assert!(cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+
+        cache
+            .extend_summary_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+
+        assert!(!cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+        let drained = cache
+            .drain_pending_tx_misses(1)
+            .expect("drain should succeed");
+        assert!(drained.is_empty());
+    }
 }

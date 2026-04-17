@@ -6,6 +6,10 @@ use std::collections::HashMap;
 
 use super::SqlxWalletDb;
 
+type LookupSource = &'static str;
+type ScriptPathLookup = (Option<(KeychainKind, u32)>, LookupSource);
+type TxLookup = (Option<TransactionDetails>, LookupSource);
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(super) enum TxLookupMode {
     Any,
@@ -90,7 +94,7 @@ impl SqlxWalletDb {
     pub(super) fn lookup_script_pubkey_path(
         &self,
         script: &Script,
-    ) -> Result<(Option<(KeychainKind, u32)>, &'static str), bdk::Error> {
+    ) -> Result<ScriptPathLookup, bdk::Error> {
         if let Some(path) = self.batch.addresses.get(script) {
             return Ok((Some(*path), "batch"));
         }
@@ -136,7 +140,7 @@ impl SqlxWalletDb {
         &self,
         txid: &Txid,
         mode: TxLookupMode,
-    ) -> Result<(Option<TransactionDetails>, &'static str), bdk::Error> {
+    ) -> Result<TxLookup, bdk::Error> {
         if let Some(tx) = self.batch.txs.get(txid) {
             if Self::tx_matches_lookup_mode(tx, mode) {
                 return Ok((Some(tx.clone()), "batch"));
@@ -195,10 +199,7 @@ impl SqlxWalletDb {
         }
     }
 
-    pub(super) fn lookup_tx(
-        &self,
-        txid: &Txid,
-    ) -> Result<(Option<TransactionDetails>, &'static str), bdk::Error> {
+    pub(super) fn lookup_tx(&self, txid: &Txid) -> Result<TxLookup, bdk::Error> {
         self.lookup_tx_with_mode(txid, TxLookupMode::Any)
     }
 
