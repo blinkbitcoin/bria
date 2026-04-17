@@ -305,6 +305,15 @@ impl WalletCache {
         Ok(drained)
     }
 
+    pub(super) fn requeue_pending_script_misses<I>(&self, scripts: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = ScriptBuf>,
+    {
+        let mut pending = self.lock_pending_script_misses()?;
+        pending.extend(scripts);
+        Ok(())
+    }
+
     pub(super) fn txid_marked_missing(&self, txid: &Txid) -> Result<bool, bdk::Error> {
         let missing = self.lock_missing_txids()?;
         Ok(missing.contains(txid))
@@ -334,6 +343,15 @@ impl WalletCache {
             pending.remove(txid);
         }
         Ok(drained)
+    }
+
+    pub(super) fn requeue_pending_tx_misses<I>(&self, txids: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = Txid>,
+    {
+        let mut pending = self.lock_pending_tx_misses()?;
+        pending.extend(txids);
+        Ok(())
     }
 
     pub(super) fn should_batch_resolve_script_misses(

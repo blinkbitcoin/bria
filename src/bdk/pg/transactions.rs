@@ -39,7 +39,7 @@ impl Transactions {
     fn parse_txid(tx_id: &str) -> Result<Txid, bdk::Error> {
         tx_id
             .parse::<Txid>()
-            .map_err(|e| bdk::Error::Generic(format!("invalid tx_id in db: {e}")))
+            .map_err(|e| bdk::Error::Generic(format!("invalid tx_id in db '{tx_id}': {e}")))
     }
 
     fn deserialize_details(

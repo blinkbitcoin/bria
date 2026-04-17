@@ -47,11 +47,17 @@ impl SqlxWalletDb {
             return Ok(());
         }
 
-        let found = self.ctx.rt.block_on(async {
+        let found = match self.ctx.rt.block_on(async {
             self.script_pubkeys_repo()
                 .find_paths_for_scripts(&pending)
                 .await
-        })?;
+        }) {
+            Ok(found) => found,
+            Err(error) => {
+                self.cache.requeue_pending_script_misses(pending)?;
+                return Err(error);
+            }
+        };
 
         if !found.is_empty() {
             self.cache.extend_script_pubkeys(
@@ -79,10 +85,17 @@ impl SqlxWalletDb {
             return Ok(());
         }
 
-        let found = self
+        let found = match self
             .ctx
             .rt
-            .block_on(async { self.transactions_repo().find_by_ids(&pending).await })?;
+            .block_on(async { self.transactions_repo().find_by_ids(&pending).await })
+        {
+            Ok(found) => found,
+            Err(error) => {
+                self.cache.requeue_pending_tx_misses(pending)?;
+                return Err(error);
+            }
+        };
 
         if !found.is_empty() {
             self.cache.extend_txs(found)?;
