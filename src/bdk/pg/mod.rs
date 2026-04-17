@@ -203,6 +203,14 @@ impl WalletCache {
         Ok(cache.values().cloned().collect())
     }
 
+    fn all_summary_txs(&self) -> Result<HashMap<Txid, TransactionDetails>, bdk::Error> {
+        let cache = self.lock_transactions()?;
+        Ok(cache
+            .values()
+            .map(|tx| (tx.txid, SqlxWalletDb::summary_tx_from_ref(tx)))
+            .collect())
+    }
+
     fn raw_txs_fully_loaded(&self) -> bool {
         self.raw_txs_fully_loaded.load(Ordering::Acquire)
     }
@@ -353,14 +361,35 @@ impl SqlxWalletDb {
         mode == TxLookupMode::Any || tx.transaction.is_some()
     }
 
-    fn tx_without_raw(mut tx: TransactionDetails) -> TransactionDetails {
-        tx.transaction = None;
-        tx
+    fn summary_tx_from_ref(tx: &TransactionDetails) -> TransactionDetails {
+        TransactionDetails {
+            transaction: None,
+            txid: tx.txid,
+            received: tx.received,
+            sent: tx.sent,
+            fee: tx.fee,
+            confirmation_time: tx.confirmation_time.clone(),
+        }
     }
 
-    fn without_raw(tx: TransactionDetails) -> (Txid, TransactionDetails) {
-        let txid = tx.txid;
-        (txid, Self::tx_without_raw(tx))
+    fn summary_tx_from_owned(tx: TransactionDetails) -> TransactionDetails {
+        let TransactionDetails {
+            txid,
+            received,
+            sent,
+            fee,
+            confirmation_time,
+            ..
+        } = tx;
+
+        TransactionDetails {
+            transaction: None,
+            txid,
+            received,
+            sent,
+            fee,
+            confirmation_time,
+        }
     }
 
     fn overlay_batch_txs(
@@ -374,7 +403,7 @@ impl SqlxWalletDb {
             txs.extend(
                 batch_txs
                     .iter()
-                    .map(|(id, tx)| (*id, Self::tx_without_raw(tx.clone()))),
+                    .map(|(id, tx)| (*id, Self::summary_tx_from_ref(tx))),
             );
         }
 
@@ -560,12 +589,7 @@ impl Database for SqlxWalletDb {
             // Once raw txs are fully loaded for this process, serve summary calls from cache to
             // avoid repeated full-table reads. This returns the in-process snapshot (kept current
             // by set/del/commit paths) rather than forcing a fresh DB roundtrip.
-            (false, true) => self
-                .cache
-                .all_txs()?
-                .into_iter()
-                .map(Self::without_raw)
-                .collect(),
+            (false, true) => self.cache.all_summary_txs()?,
             (false, false) => {
                 let txs = self
                     .ctx
@@ -621,11 +645,12 @@ impl Database for SqlxWalletDb {
         include_raw: bool,
     ) -> Result<Option<TransactionDetails>, bdk::Error> {
         self.lookup_tx(tx_id).map(|tx| {
-            tx.map(|mut tx| {
-                if !include_raw {
-                    tx.transaction = None;
+            tx.map(|tx| {
+                if include_raw {
+                    tx
+                } else {
+                    Self::summary_tx_from_owned(tx)
                 }
-                tx
             })
         })
     }
