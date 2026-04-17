@@ -5,12 +5,27 @@ use uuid::Uuid;
 use super::convert::BdkKeychainKind;
 use crate::primitives::{bitcoin::ScriptBuf, *};
 
+type ScriptWithPath = (ScriptBuf, (bdk::KeychainKind, u32));
+
 pub struct ScriptPubkeys {
     keychain_id: KeychainId,
     pool: PgPool,
 }
 
 impl ScriptPubkeys {
+    fn script_with_path(
+        script: Vec<u8>,
+        keychain_kind: BdkKeychainKind,
+        path: i32,
+    ) -> Result<ScriptWithPath, bdk::Error> {
+        let path = u32::try_from(path)
+            .map_err(|_| bdk::Error::Generic(format!("invalid derivation path from db: {path}")))?;
+        Ok((
+            ScriptBuf::from(script),
+            (bdk::KeychainKind::from(keychain_kind), path),
+        ))
+    }
+
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
         Self { keychain_id, pool }
     }
@@ -88,12 +103,12 @@ impl ScriptPubkeys {
         keychain: impl Into<BdkKeychainKind>,
         path: u32,
     ) -> Result<Option<ScriptBuf>, bdk::Error> {
-        let kind = keychain.into();
+        let keychain_kind = keychain.into();
         let row = sqlx::query!(
             r#"SELECT script FROM bdk_script_pubkeys
             WHERE keychain_id = $1 AND keychain_kind = $2 AND path = $3"#,
             Uuid::from(self.keychain_id),
-            kind as BdkKeychainKind,
+            keychain_kind as BdkKeychainKind,
             path as i32,
         )
         .fetch_optional(&self.pool)
@@ -118,21 +133,31 @@ impl ScriptPubkeys {
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-        Ok(row.map(|row| (row.keychain_kind, row.path as u32)))
+        row.map(|row| {
+            u32::try_from(row.path)
+                .map(|path| (row.keychain_kind, path))
+                .map_err(|_| {
+                    bdk::Error::Generic(format!("invalid derivation path from db: {}", row.path))
+                })
+        })
+        .transpose()
     }
 
     #[instrument(name = "bdk.script_pubkeys.list_scripts", skip_all)]
+    // Retained for non-path call sites and focused tests.
+    #[allow(dead_code)]
     pub async fn list_scripts(
         &self,
         keychain: Option<impl Into<BdkKeychainKind>>,
     ) -> Result<Vec<ScriptBuf>, bdk::Error> {
         let keychain_id = Uuid::from(self.keychain_id);
-        let scripts = if let Some(kind) = keychain.map(Into::into) {
+        let keychain_kind: Option<BdkKeychainKind> = keychain.map(Into::into);
+        let scripts = if let Some(keychain_kind) = keychain_kind {
             sqlx::query_scalar!(
                 r#"SELECT script FROM bdk_script_pubkeys
                 WHERE keychain_id = $1 AND keychain_kind = $2"#,
                 keychain_id,
-                kind as BdkKeychainKind,
+                keychain_kind as BdkKeychainKind,
             )
             .fetch_all(&self.pool)
             .await
@@ -149,5 +174,44 @@ impl ScriptPubkeys {
         };
 
         Ok(scripts.into_iter().map(ScriptBuf::from).collect())
+    }
+
+    #[instrument(name = "bdk.script_pubkeys.list_scripts_with_paths", skip_all)]
+    pub async fn list_scripts_with_paths(
+        &self,
+        keychain: Option<impl Into<BdkKeychainKind>>,
+    ) -> Result<Vec<ScriptWithPath>, bdk::Error> {
+        let keychain_id = Uuid::from(self.keychain_id);
+        let keychain_kind: Option<BdkKeychainKind> = keychain.map(Into::into);
+        if let Some(keychain_kind) = keychain_kind {
+            let rows = sqlx::query!(
+                r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind", path FROM bdk_script_pubkeys
+                WHERE keychain_id = $1 AND keychain_kind = $2"#,
+                keychain_id,
+                keychain_kind as BdkKeychainKind,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+            Ok(rows
+                .into_iter()
+                .map(|row| Self::script_with_path(row.script, row.keychain_kind, row.path))
+                .collect::<Result<Vec<_>, _>>()?)
+        } else {
+            let rows = sqlx::query!(
+                r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind", path FROM bdk_script_pubkeys
+                WHERE keychain_id = $1"#,
+                keychain_id,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+            Ok(rows
+                .into_iter()
+                .map(|row| Self::script_with_path(row.script, row.keychain_kind, row.path))
+                .collect::<Result<Vec<_>, _>>()?)
+        }
     }
 }

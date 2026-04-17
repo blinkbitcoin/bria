@@ -683,6 +683,16 @@ async fn cleanup_soft_deleted_utxos(ctx: &KeychainSyncContext<'_>) -> Result<(),
                 tx.commit().await?;
                 continue;
             }
+            Err(UtxoError::UtxoAlreadySettledError) => {
+                // This can happen if the soft-deleted BDK UTXO maps to a bria UTXO that is
+                // already accounting-settled. Do not fail/retry the whole sync job; restore the
+                // BDK row visibility and continue.
+                // If rollback itself fails, this iteration returns early and undelete is skipped;
+                // the next sync cycle re-attempts reconciliation.
+                tx.rollback().await?;
+                ctx.bdk_utxos.undelete(outpoint).await?;
+                continue;
+            }
             Err(e) => return Err(e.into()),
         };
 
