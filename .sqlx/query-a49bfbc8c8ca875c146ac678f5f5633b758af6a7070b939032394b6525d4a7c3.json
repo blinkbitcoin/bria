@@ -1,0 +1,55 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT script, keychain_kind as \"keychain_kind: BdkKeychainKind\", path FROM bdk_script_pubkeys\n                WHERE keychain_id = $1 AND keychain_kind = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "script",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "keychain_kind: BdkKeychainKind",
+        "type_info": {
+          "Custom": {
+            "name": "bdkkeychainkind",
+            "kind": {
+              "Enum": [
+                "external",
+                "internal"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "path",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "bdkkeychainkind",
+            "kind": {
+              "Enum": [
+                "external",
+                "internal"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a49bfbc8c8ca875c146ac678f5f5633b758af6a7070b939032394b6525d4a7c3"
+}
