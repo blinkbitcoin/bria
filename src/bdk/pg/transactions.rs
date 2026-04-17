@@ -227,7 +227,13 @@ impl Transactions {
             .map(|row| {
                 let txid = Self::parse_txid(&row.tx_id)?;
                 let tx = Self::deserialize_details(row.details_json)?;
-                Ok((txid, tx))
+                if tx.txid != txid {
+                    return Err(bdk::Error::Generic(format!(
+                        "mismatched tx ids in bdk_transactions: tx_id column {} != details_json txid {}",
+                        txid, tx.txid
+                    )));
+                }
+                Ok((tx.txid, tx))
             })
             .collect()
     }
