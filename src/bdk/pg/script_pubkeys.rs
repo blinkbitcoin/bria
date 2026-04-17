@@ -17,11 +17,13 @@ impl ScriptPubkeys {
         script: Vec<u8>,
         keychain_kind: BdkKeychainKind,
         path: i32,
-    ) -> ScriptWithPath {
-        (
+    ) -> Result<ScriptWithPath, bdk::Error> {
+        let path = u32::try_from(path)
+            .map_err(|_| bdk::Error::Generic(format!("invalid derivation path from db: {path}")))?;
+        Ok((
             ScriptBuf::from(script),
-            (bdk::KeychainKind::from(keychain_kind), path as u32),
-        )
+            (bdk::KeychainKind::from(keychain_kind), path),
+        ))
     }
 
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
@@ -131,7 +133,14 @@ impl ScriptPubkeys {
         .await
         .map_err(|e| bdk::Error::Generic(e.to_string()))?;
 
-        Ok(row.map(|row| (row.keychain_kind, row.path as u32)))
+        row.map(|row| {
+            u32::try_from(row.path)
+                .map(|path| (row.keychain_kind, path))
+                .map_err(|_| {
+                    bdk::Error::Generic(format!("invalid derivation path from db: {}", row.path))
+                })
+        })
+        .transpose()
     }
 
     #[instrument(name = "bdk.script_pubkeys.list_scripts", skip_all)]
@@ -188,7 +197,7 @@ impl ScriptPubkeys {
             Ok(rows
                 .into_iter()
                 .map(|row| Self::script_with_path(row.script, row.keychain_kind, row.path))
-                .collect())
+                .collect::<Result<Vec<_>, _>>()?)
         } else {
             let rows = sqlx::query!(
                 r#"SELECT script, keychain_kind as "keychain_kind: BdkKeychainKind", path FROM bdk_script_pubkeys
@@ -202,7 +211,7 @@ impl ScriptPubkeys {
             Ok(rows
                 .into_iter()
                 .map(|row| Self::script_with_path(row.script, row.keychain_kind, row.path))
-                .collect())
+                .collect::<Result<Vec<_>, _>>()?)
         }
     }
 }

@@ -67,6 +67,7 @@ struct WalletCache {
     transactions: Arc<Mutex<TransactionCache>>,
     // Process-local hint for which keychain script path sets are fully hydrated.
     // Bit 0: external, bit 1: internal.
+    // This is intentionally not synchronized across processes.
     script_pubkeys_loaded_mask: Arc<AtomicU8>,
     // Process-local hint: true means this instance has already hydrated raw tx details
     // from the DB at least once. It is intentionally not synchronized across processes.
@@ -182,6 +183,10 @@ impl WalletCache {
     {
         let mut cache = self.lock_transactions()?;
         for (txid, mut summary) in entries {
+            // Summary refreshes may run after raw tx bytes were already hydrated. Preserve any
+            // cached raw transaction payload while applying fresh DB metadata fields.
+            // `iter_txs` overlays in-memory batch writes afterwards, so uncommitted updates still
+            // take precedence in returned views.
             if let Some(raw_tx) = cache
                 .get(&txid)
                 .and_then(|existing| existing.transaction.clone())
@@ -234,6 +239,24 @@ impl SqlxWalletDb {
 
     fn script_pubkeys_repo(&self) -> ScriptPubkeys {
         ScriptPubkeys::new(self.ctx.keychain_id, self.ctx.pool.clone())
+    }
+
+    fn cache_loaded_script_pubkeys(
+        cache: &WalletCache,
+        keychain: Option<KeychainKind>,
+        scripts_with_paths: Vec<(ScriptBuf, (KeychainKind, u32))>,
+    ) -> Result<Vec<ScriptBuf>, bdk::Error> {
+        cache.extend_script_pubkeys(
+            scripts_with_paths
+                .iter()
+                .map(|(script, path)| (script.clone(), *path)),
+        )?;
+        cache.mark_script_pubkeys_loaded(keychain);
+
+        Ok(scripts_with_paths
+            .into_iter()
+            .map(|(script, _)| script)
+            .collect())
     }
 
     fn utxos_repo(&self) -> Utxos {
@@ -500,17 +523,7 @@ impl Database for SqlxWalletDb {
                 .await
         })?;
 
-        self.cache.extend_script_pubkeys(
-            scripts_with_paths
-                .iter()
-                .map(|(script, path)| (script.clone(), *path)),
-        )?;
-        self.cache.mark_script_pubkeys_loaded(keychain);
-
-        Ok(scripts_with_paths
-            .into_iter()
-            .map(|(script, _)| script)
-            .collect())
+        Self::cache_loaded_script_pubkeys(&self.cache, keychain, scripts_with_paths)
     }
 
     #[tracing::instrument(name = "bdk.db.iter_utxos", skip_all, err)]
@@ -544,6 +557,9 @@ impl Database for SqlxWalletDb {
                 self.cache.set_raw_txs_fully_loaded();
                 loaded
             }
+            // Once raw txs are fully loaded for this process, serve summary calls from cache to
+            // avoid repeated full-table reads. This returns the in-process snapshot (kept current
+            // by set/del/commit paths) rather than forcing a fresh DB roundtrip.
             (false, true) => self
                 .cache
                 .all_txs()?
@@ -825,5 +841,91 @@ mod tests {
         let txs = cache.all_txs().expect("all_txs should succeed");
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0].txid, txid);
+    }
+
+    #[test]
+    fn wallet_cache_extend_summary_txs_preserves_raw_and_refreshes_metadata() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        let raw_tx = bdk::bitcoin::Transaction {
+            version: 2,
+            lock_time: bdk::bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+
+        let mut existing = tx_details(txid);
+        existing.transaction = Some(raw_tx.clone());
+        existing.received = 1;
+        cache
+            .insert_tx(txid, existing)
+            .expect("insert should succeed");
+
+        let mut summary = tx_details(txid);
+        summary.received = 42;
+        summary.sent = 7;
+        summary.fee = Some(3);
+        summary.confirmation_time = Some(bdk::BlockTime {
+            height: 100,
+            timestamp: 123,
+        });
+
+        cache
+            .extend_summary_txs([(txid, summary)])
+            .expect("extend should succeed");
+
+        let merged = cache
+            .get_tx(&txid)
+            .expect("get should succeed")
+            .expect("tx should exist");
+        assert_eq!(merged.transaction, Some(raw_tx));
+        assert_eq!(merged.received, 42);
+        assert_eq!(merged.sent, 7);
+        assert_eq!(merged.fee, Some(3));
+        assert_eq!(
+            merged.confirmation_time,
+            Some(bdk::BlockTime {
+                height: 100,
+                timestamp: 123,
+            })
+        );
+    }
+
+    #[test]
+    fn cache_loaded_script_pubkeys_marks_mask_and_populates_paths() {
+        let cache = WalletCache::new();
+        let external_script = ScriptBuf::from(vec![0x51]);
+        let internal_script = ScriptBuf::from(vec![0x52]);
+
+        let loaded = SqlxWalletDb::cache_loaded_script_pubkeys(
+            &cache,
+            Some(KeychainKind::External),
+            vec![(external_script.clone(), (KeychainKind::External, 7))],
+        )
+        .expect("cache should be populated");
+
+        assert_eq!(loaded, vec![external_script.clone()]);
+        assert!(cache.script_pubkeys_fully_loaded(Some(KeychainKind::External)));
+        assert!(!cache.script_pubkeys_fully_loaded(Some(KeychainKind::Internal)));
+        assert_eq!(
+            cache
+                .get_script_pubkey_path(external_script.as_script())
+                .expect("path lookup should succeed"),
+            Some((KeychainKind::External, 7))
+        );
+
+        SqlxWalletDb::cache_loaded_script_pubkeys(
+            &cache,
+            Some(KeychainKind::Internal),
+            vec![(internal_script.clone(), (KeychainKind::Internal, 3))],
+        )
+        .expect("cache should be populated");
+
+        assert!(cache.script_pubkeys_fully_loaded(None));
+        let all = cache
+            .all_script_pubkeys(None)
+            .expect("all_script_pubkeys should succeed");
+        assert_eq!(all.len(), 2);
     }
 }
