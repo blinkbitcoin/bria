@@ -250,15 +250,35 @@ impl KeychainWallet {
 
             let _ = wallet.ensure_addresses_cached(max_last_index.saturating_add(1))?;
 
-            let tx_count = wallet.database().tx_count()?;
-            if should_prewarm_raw_txs(tx_count) {
-                let prewarmed_txs = wallet.database().prewarm_raw_txs()?;
-                tracing::info!(
-                    tx_count,
-                    prewarmed_txs,
-                    threshold = TX_PREWARM_THRESHOLD,
-                    "prewarmed raw tx cache before wallet sync"
-                );
+            match wallet.database().tx_count() {
+                Ok(tx_count) if should_prewarm_raw_txs(tx_count) => {
+                    match wallet.database().prewarm_raw_txs() {
+                        Ok(prewarmed_txs) => {
+                            tracing::info!(
+                                tx_count,
+                                prewarmed_txs,
+                                threshold = TX_PREWARM_THRESHOLD,
+                                "prewarmed raw tx cache before wallet sync"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                ?error,
+                                tx_count,
+                                threshold = TX_PREWARM_THRESHOLD,
+                                "failed to prewarm raw tx cache before wallet sync; continuing"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        threshold = TX_PREWARM_THRESHOLD,
+                        "failed to load tx count for raw tx cache prewarm; continuing without prewarm"
+                    );
+                }
             }
 
             let progress = TracingBdkProgress::new(context, wallet_id, keychain_id);
