@@ -357,6 +357,7 @@ impl SqlxWalletDb {
                 // Mark this txid as missing immediately after the forced batch query so concurrent
                 // callers don't re-enqueue it while this lookup continues through miss resolution.
                 self.cache.record_missing_txid(*txid)?;
+                self.cache.enqueue_pending_tx_miss(*txid)?;
             }
             ForcedTxLookupOutcome::NotQueried => {
                 debug_assert!(false, "forced lookup should always query requested txid");
