@@ -288,7 +288,9 @@ impl WalletCache {
             let mut cache = self.lock_transactions()?;
             cache.remove(txid);
         }
-        self.lock_forced_tx_miss_retries()?.remove(txid);
+        {
+            self.lock_forced_tx_miss_retries()?.remove(txid);
+        }
         self.record_missing_txid(*txid)?;
         Ok(())
     }
