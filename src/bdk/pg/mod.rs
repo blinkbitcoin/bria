@@ -82,9 +82,14 @@ impl SqlxWalletDb {
     }
 
     pub fn prewarm_raw_txs(&self) -> Result<usize, bdk::Error> {
-        use bdk::database::Database;
-
-        Ok(Database::iter_txs(self, true)?.len())
+        let loaded = self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().load_all().await })?;
+        let loaded_count = loaded.len();
+        self.cache.extend_txs(loaded)?;
+        self.cache.set_raw_txs_fully_loaded();
+        Ok(loaded_count)
     }
 
     fn script_pubkeys_repo(&self) -> ScriptPubkeys {
