@@ -1,3 +1,10 @@
+# [bria release v0.1.138](https://github.com/blinkbitcoin/bria/releases/tag/0.1.138)
+
+
+### Performance
+
+- Batch and harden wallet sync tx lookups (#60)
+
 # [bria release v0.1.137](https://github.com/blinkbitcoin/bria/releases/tag/0.1.137)
 
 
