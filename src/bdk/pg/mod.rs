@@ -75,6 +75,23 @@ impl SqlxWalletDb {
         }
     }
 
+    pub fn tx_count(&self) -> Result<i64, bdk::Error> {
+        self.ctx
+            .rt
+            .block_on(async { self.transactions_repo().count_active().await })
+    }
+
+    pub fn prewarm_raw_txs(&self) -> Result<usize, bdk::Error> {
+        let loaded = self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().load_all().await })?;
+        let loaded_count = loaded.len();
+        self.cache.extend_txs(loaded)?;
+        self.cache.set_raw_txs_fully_loaded();
+        Ok(loaded_count)
+    }
+
     fn script_pubkeys_repo(&self) -> ScriptPubkeys {
         ScriptPubkeys::new(self.ctx.keychain_id, self.ctx.pool.clone())
     }
@@ -141,7 +158,7 @@ mod tests {
         let details = tx_details(txid);
 
         cache
-            .insert_tx(txid, details.clone())
+            .extend_txs([(txid, details.clone())])
             .expect("insert should succeed");
         let loaded = cache.get_tx(&txid).expect("get should succeed");
         assert_eq!(loaded, Some(details));
@@ -236,7 +253,7 @@ mod tests {
         let txid = Txid::all_zeros();
 
         cache
-            .insert_tx(txid, tx_details(txid))
+            .extend_txs([(txid, tx_details(txid))])
             .expect("insert should succeed");
 
         let txs = cache.all_txs().expect("all_txs should succeed");
@@ -260,7 +277,7 @@ mod tests {
         existing.transaction = Some(raw_tx.clone());
         existing.received = 1;
         cache
-            .insert_tx(txid, existing)
+            .extend_txs([(txid, existing)])
             .expect("insert should succeed");
 
         let mut summary = tx_details(txid);
@@ -291,6 +308,132 @@ mod tests {
                 timestamp: 123,
             })
         );
+    }
+
+    #[test]
+    fn wallet_cache_extend_txs_clears_pending_lookup_entries() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .enqueue_pending_tx_lookup(txid)
+            .expect("enqueue should succeed");
+        let drained = cache
+            .drain_pending_tx_lookups(10)
+            .expect("drain should succeed");
+        assert_eq!(drained, vec![txid]);
+
+        cache
+            .requeue_pending_tx_lookups(vec![txid])
+            .expect("requeue should succeed");
+        cache
+            .extend_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+
+        let drained_after_insert = cache
+            .drain_pending_tx_lookups(10)
+            .expect("drain should succeed");
+        assert!(drained_after_insert.is_empty());
+    }
+
+    #[test]
+    fn wallet_cache_forced_lookup_drain_includes_requested_txid() {
+        let cache = WalletCache::new();
+        let required = Txid::all_zeros();
+        let first = Txid::from_slice(&[1; 32]).expect("valid txid");
+        let second = Txid::from_slice(&[2; 32]).expect("valid txid");
+
+        cache
+            .enqueue_pending_tx_lookup(first)
+            .expect("enqueue should succeed");
+        cache
+            .enqueue_pending_tx_lookup(second)
+            .expect("enqueue should succeed");
+
+        let drained = cache
+            .drain_pending_tx_lookups_including(required, 2)
+            .expect("forced drain should succeed");
+        assert_eq!(drained[0], required);
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(&first) || drained.contains(&second));
+
+        let remaining = cache
+            .drain_pending_tx_lookups(10)
+            .expect("drain should succeed");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn wallet_cache_forced_tx_miss_drain_includes_requested_txid() {
+        let cache = WalletCache::new();
+        let required = Txid::all_zeros();
+        let first = Txid::from_slice(&[1; 32]).expect("valid txid");
+        let second = Txid::from_slice(&[2; 32]).expect("valid txid");
+
+        cache
+            .enqueue_pending_tx_miss(first)
+            .expect("enqueue should succeed");
+        cache
+            .enqueue_pending_tx_miss(second)
+            .expect("enqueue should succeed");
+
+        let drained = cache
+            .drain_pending_tx_misses_including(required, 2)
+            .expect("forced drain should succeed");
+        assert_eq!(drained[0], required);
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(&first) || drained.contains(&second));
+
+        let remaining = cache
+            .drain_pending_tx_misses(10)
+            .expect("drain should succeed");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn wallet_cache_clears_forced_tx_miss_retry_tracking_when_tx_is_loaded() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .claim_forced_tx_miss_retry(txid)
+            .expect("record should succeed");
+        cache
+            .record_missing_txid(txid)
+            .expect("mark should succeed");
+        cache
+            .enqueue_pending_tx_miss(txid)
+            .expect("enqueue should succeed");
+
+        cache
+            .extend_summary_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+
+        assert!(!cache
+            .forced_tx_miss_retry_recorded(&txid)
+            .expect("lookup should succeed"));
+    }
+
+    #[test]
+    fn wallet_cache_remove_tx_resets_forced_tx_miss_retry_tracking() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .claim_forced_tx_miss_retry(txid)
+            .expect("record should succeed");
+        cache
+            .extend_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+        cache
+            .claim_forced_tx_miss_retry(txid)
+            .expect("record should succeed");
+
+        cache.remove_tx(&txid).expect("remove should succeed");
+
+        assert!(!cache
+            .forced_tx_miss_retry_recorded(&txid)
+            .expect("lookup should succeed"));
     }
 
     #[test]
@@ -337,11 +480,17 @@ mod tests {
         let another = Txid::from_slice(&[1; 32]).expect("valid txid");
 
         cache
-            .record_and_enqueue_missing_txid(txid)
+            .record_missing_txid(txid)
             .expect("mark should succeed");
         cache
-            .record_and_enqueue_missing_txid(another)
+            .enqueue_pending_tx_miss(txid)
+            .expect("enqueue should succeed");
+        cache
+            .record_missing_txid(another)
             .expect("mark should succeed");
+        cache
+            .enqueue_pending_tx_miss(another)
+            .expect("enqueue should succeed");
         assert!(cache
             .txid_marked_missing(&txid)
             .expect("lookup should succeed"));
@@ -400,8 +549,11 @@ mod tests {
         let txid = Txid::all_zeros();
 
         cache
-            .record_and_enqueue_missing_txid(txid)
+            .record_missing_txid(txid)
             .expect("mark should succeed");
+        cache
+            .enqueue_pending_tx_miss(txid)
+            .expect("enqueue should succeed");
         assert!(cache
             .txid_marked_missing(&txid)
             .expect("lookup should succeed"));

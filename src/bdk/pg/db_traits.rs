@@ -324,7 +324,7 @@ mod tests {
 
         let txid = Txid::all_zeros();
         db.cache
-            .insert_tx(txid, tx_details(txid))
+            .extend_txs([(txid, tx_details(txid))])
             .expect("insert should succeed");
         db.cache.set_raw_txs_fully_loaded();
 

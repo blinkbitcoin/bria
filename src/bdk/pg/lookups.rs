@@ -10,6 +10,13 @@ type LookupSource = &'static str;
 type ScriptPathLookup = (Option<(KeychainKind, u32)>, LookupSource);
 type TxLookup = (Option<TransactionDetails>, LookupSource);
 
+enum ForcedTxLookupOutcome {
+    NotQueried,
+    NotFound,
+    FoundModeMatch(TransactionDetails),
+    FoundModeMiss,
+}
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(super) enum TxLookupMode {
     Any,
@@ -18,31 +25,72 @@ pub(super) enum TxLookupMode {
 
 #[derive(Copy, Clone)]
 pub(super) struct MissResolutionPolicy {
-    pub threshold: usize,
-    pub batch_size: usize,
+    pub tx_lookup_threshold: usize,
+    pub tx_lookup_batch_size: usize,
+    pub tx_miss_threshold: usize,
+    pub tx_miss_batch_size: usize,
+    pub script_miss_threshold: usize,
+    pub script_miss_batch_size: usize,
 }
 
 impl Default for MissResolutionPolicy {
     fn default() -> Self {
         Self {
-            threshold: 64,
-            batch_size: 512,
+            tx_lookup_threshold: 64,
+            tx_lookup_batch_size: 512,
+            tx_miss_threshold: 64,
+            tx_miss_batch_size: 512,
+            script_miss_threshold: 64,
+            script_miss_batch_size: 512,
         }
     }
 }
 
 impl SqlxWalletDb {
+    fn unresolved_txids(
+        pending: Vec<Txid>,
+        found: &HashMap<Txid, TransactionDetails>,
+    ) -> Vec<Txid> {
+        pending
+            .into_iter()
+            .filter(|txid| !found.contains_key(txid))
+            .collect()
+    }
+
+    fn lookup_cached_tx_with_mode(
+        &self,
+        txid: &Txid,
+        mode: TxLookupMode,
+        hit_source: LookupSource,
+        mode_miss_source: LookupSource,
+    ) -> Result<Option<TxLookup>, bdk::Error> {
+        let Some(tx) = self.cache.get_tx(txid)? else {
+            return Ok(None);
+        };
+
+        if Self::tx_matches_lookup_mode(&tx, mode) {
+            return Ok(Some((Some(tx), hit_source)));
+        }
+
+        if self.cache.raw_txs_fully_loaded() {
+            self.cache.record_missing_txid(*txid)?;
+            return Ok(Some((None, mode_miss_source)));
+        }
+
+        Ok(None)
+    }
+
     fn resolve_pending_script_misses(&self) -> Result<(), bdk::Error> {
         if !self
             .cache
-            .should_batch_resolve_script_misses(self.miss_resolution.threshold)?
+            .should_batch_resolve_script_misses(self.miss_resolution.script_miss_threshold)?
         {
             return Ok(());
         }
 
         let pending = self
             .cache
-            .drain_pending_script_misses(self.miss_resolution.batch_size)?;
+            .drain_pending_script_misses(self.miss_resolution.script_miss_batch_size)?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -70,19 +118,27 @@ impl SqlxWalletDb {
         Ok(())
     }
 
-    fn resolve_pending_tx_misses(&self) -> Result<(), bdk::Error> {
-        if !self
-            .cache
-            .should_batch_resolve_tx_misses(self.miss_resolution.threshold)?
+    fn resolve_pending_tx_misses_internal(
+        &self,
+        force_txid: Option<Txid>,
+    ) -> Result<bool, bdk::Error> {
+        if force_txid.is_none()
+            && !self
+                .cache
+                .should_batch_resolve_tx_misses(self.miss_resolution.tx_miss_threshold)?
         {
-            return Ok(());
+            return Ok(false);
         }
 
-        let pending = self
-            .cache
-            .drain_pending_tx_misses(self.miss_resolution.batch_size)?;
+        let pending = if let Some(txid) = force_txid {
+            self.cache
+                .drain_pending_tx_misses_including(txid, self.miss_resolution.tx_miss_batch_size)?
+        } else {
+            self.cache
+                .drain_pending_tx_misses(self.miss_resolution.tx_miss_batch_size)?
+        };
         if pending.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         let found = match self
@@ -97,11 +153,97 @@ impl SqlxWalletDb {
             }
         };
 
+        let unresolved = Self::unresolved_txids(pending, &found);
+
         if !found.is_empty() {
             self.cache.extend_txs(found)?;
         }
 
+        if !unresolved.is_empty() {
+            self.cache.requeue_pending_tx_misses(unresolved)?;
+        }
+
+        Ok(true)
+    }
+
+    fn resolve_pending_tx_misses(&self) -> Result<(), bdk::Error> {
+        let _ = self.resolve_pending_tx_misses_internal(None)?;
         Ok(())
+    }
+
+    fn resolve_pending_tx_misses_force(&self, txid: Txid) -> Result<bool, bdk::Error> {
+        self.resolve_pending_tx_misses_internal(Some(txid))
+    }
+
+    fn resolve_pending_tx_lookups_internal(
+        &self,
+        force_txid: Option<Txid>,
+        mode: TxLookupMode,
+    ) -> Result<ForcedTxLookupOutcome, bdk::Error> {
+        if force_txid.is_none()
+            && !self
+                .cache
+                .should_batch_resolve_tx_lookups(self.miss_resolution.tx_lookup_threshold)?
+        {
+            return Ok(ForcedTxLookupOutcome::NotQueried);
+        }
+
+        let pending = if let Some(txid) = force_txid {
+            self.cache.drain_pending_tx_lookups_including(
+                txid,
+                self.miss_resolution.tx_lookup_batch_size,
+            )?
+        } else {
+            self.cache
+                .drain_pending_tx_lookups(self.miss_resolution.tx_lookup_batch_size)?
+        };
+        if pending.is_empty() {
+            return Ok(ForcedTxLookupOutcome::NotQueried);
+        }
+
+        let found = match self
+            .ctx
+            .rt
+            .block_on(async { self.transactions_repo().find_by_ids(&pending).await })
+        {
+            Ok(found) => found,
+            Err(error) => {
+                self.cache.requeue_pending_tx_lookups(pending)?;
+                return Err(error);
+            }
+        };
+
+        let forced_outcome = force_txid.map_or(ForcedTxLookupOutcome::NotQueried, |txid| {
+            found
+                .get(&txid)
+                .cloned()
+                .map_or(ForcedTxLookupOutcome::NotFound, |tx| {
+                    if Self::tx_matches_lookup_mode(&tx, mode) {
+                        ForcedTxLookupOutcome::FoundModeMatch(tx)
+                    } else {
+                        ForcedTxLookupOutcome::FoundModeMiss
+                    }
+                })
+        });
+
+        if !found.is_empty() {
+            self.cache.extend_txs(found)?;
+        }
+
+        Ok(forced_outcome)
+    }
+
+    fn resolve_pending_tx_lookups(&self) -> Result<(), bdk::Error> {
+        let _ = self.resolve_pending_tx_lookups_internal(None, TxLookupMode::Any)?;
+        Ok(())
+    }
+
+    fn resolve_pending_tx_lookups_force(
+        &self,
+        txid: Txid,
+        mode: TxLookupMode,
+    ) -> Result<ForcedTxLookupOutcome, bdk::Error> {
+        self.resolve_pending_tx_lookups_internal(Some(txid), mode)
     }
 
     pub(super) fn lookup_script_pubkey_path(
@@ -163,18 +305,29 @@ impl SqlxWalletDb {
             return Ok((None, "batch_mode_miss"));
         }
 
-        if let Some(tx) = self.cache.get_tx(txid)? {
-            if Self::tx_matches_lookup_mode(&tx, mode) {
-                return Ok((Some(tx), "cache"));
-            }
-
-            if self.cache.raw_txs_fully_loaded() {
-                self.cache.record_missing_txid(*txid)?;
-                return Ok((None, "cache_mode_miss"));
-            }
+        if let Some(result) =
+            self.lookup_cached_tx_with_mode(txid, mode, "cache", "cache_mode_miss")?
+        {
+            return Ok(result);
         }
 
         if self.cache.txid_marked_missing(txid)? {
+            let should_force_miss_retry = if self.cache.pending_tx_miss_queued(txid)? {
+                self.cache.claim_forced_tx_miss_retry(*txid)?
+            } else {
+                false
+            };
+            if should_force_miss_retry && self.resolve_pending_tx_misses_force(*txid)? {
+                if let Some(result) = self.lookup_cached_tx_with_mode(
+                    txid,
+                    mode,
+                    "forced_miss_resolve",
+                    "forced_miss_resolve_mode_miss",
+                )? {
+                    return Ok(result);
+                }
+            }
+
             tracing::trace!("tx miss cache hit");
             return Ok((None, "miss_cache"));
         }
@@ -185,36 +338,42 @@ impl SqlxWalletDb {
             return Ok((None, "fully_loaded_miss"));
         }
 
-        self.resolve_pending_tx_misses()?;
-        if let Some(tx) = self.cache.get_tx(txid)? {
-            if Self::tx_matches_lookup_mode(&tx, mode) {
-                return Ok((Some(tx), "batch_resolve"));
+        self.cache.enqueue_pending_tx_lookup(*txid)?;
+        self.resolve_pending_tx_lookups()?;
+        if let Some(result) =
+            self.lookup_cached_tx_with_mode(txid, mode, "batch_lookup", "batch_lookup_mode_miss")?
+        {
+            return Ok(result);
+        }
+
+        match self.resolve_pending_tx_lookups_force(*txid, mode)? {
+            ForcedTxLookupOutcome::FoundModeMatch(tx) => {
+                return Ok((Some(tx), "forced_batch_lookup"));
             }
-            if self.cache.raw_txs_fully_loaded() {
+            ForcedTxLookupOutcome::FoundModeMiss => {
+                return Ok((None, "forced_batch_lookup_mode_miss"));
+            }
+            ForcedTxLookupOutcome::NotFound => {
+                // Mark this txid as missing immediately after the forced batch query so concurrent
+                // callers don't re-enqueue it while this lookup continues through miss resolution.
                 self.cache.record_missing_txid(*txid)?;
-                return Ok((None, "batch_resolve_mode_miss"));
+                self.cache.enqueue_pending_tx_miss(*txid)?;
+            }
+            ForcedTxLookupOutcome::NotQueried => {
+                debug_assert!(false, "forced lookup should always query requested txid");
             }
         }
 
-        let found = self
-            .ctx
-            .rt
-            .block_on(async { self.transactions_repo().find_by_id(txid).await })?;
-
-        // DB rows represent persisted TransactionDetails. In `RequireRaw` mode, a summary-only
-        // row is a mode miss (not an existence miss).
-
-        if let Some(tx) = &found {
-            self.cache.insert_tx(tx.txid, tx.clone())?;
-            if Self::tx_matches_lookup_mode(tx, mode) {
-                Ok((found, "db_hit"))
-            } else {
-                Ok((None, "db_mode_miss"))
-            }
-        } else {
-            self.cache.record_and_enqueue_missing_txid(*txid)?;
-            Ok((None, "db_miss"))
+        self.resolve_pending_tx_misses()?;
+        if let Some(result) =
+            self.lookup_cached_tx_with_mode(txid, mode, "batch_resolve", "batch_resolve_mode_miss")?
+        {
+            return Ok(result);
         }
+
+        self.cache.record_missing_txid(*txid)?;
+        self.cache.enqueue_pending_tx_miss(*txid)?;
+        Ok((None, "db_miss"))
     }
 
     pub(super) fn lookup_tx(&self, txid: &Txid) -> Result<TxLookup, bdk::Error> {
@@ -272,5 +431,46 @@ impl SqlxWalletDb {
         }
 
         txs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bdk::bitcoin::hashes::Hash;
+
+    fn tx_details(txid: Txid) -> TransactionDetails {
+        TransactionDetails {
+            transaction: None,
+            txid,
+            received: 0,
+            sent: 0,
+            fee: None,
+            confirmation_time: None,
+        }
+    }
+
+    #[test]
+    fn unresolved_txids_keeps_only_not_found_entries() {
+        let first = Txid::all_zeros();
+        let second = Txid::from_slice(&[1; 32]).expect("valid txid");
+        let third = Txid::from_slice(&[2; 32]).expect("valid txid");
+
+        let mut found = HashMap::new();
+        found.insert(second, tx_details(second));
+
+        let unresolved = SqlxWalletDb::unresolved_txids(vec![first, second, third], &found);
+        assert_eq!(unresolved, vec![first, third]);
+    }
+
+    #[test]
+    fn summary_tx_in_require_raw_mode_is_mode_miss_not_absent() {
+        let tx = tx_details(Txid::all_zeros());
+
+        assert!(!SqlxWalletDb::tx_matches_lookup_mode(
+            &tx,
+            TxLookupMode::RequireRaw
+        ));
+        assert!(SqlxWalletDb::tx_matches_lookup_mode(&tx, TxLookupMode::Any));
     }
 }
