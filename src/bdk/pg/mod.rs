@@ -386,6 +386,52 @@ mod tests {
     }
 
     #[test]
+    fn wallet_cache_clears_forced_tx_miss_retry_tracking_when_tx_is_loaded() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .claim_forced_tx_miss_retry(txid)
+            .expect("record should succeed");
+        cache
+            .record_missing_txid(txid)
+            .expect("mark should succeed");
+        cache
+            .enqueue_pending_tx_miss(txid)
+            .expect("enqueue should succeed");
+
+        cache
+            .extend_summary_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+
+        assert!(!cache
+            .forced_tx_miss_retry_recorded(&txid)
+            .expect("lookup should succeed"));
+    }
+
+    #[test]
+    fn wallet_cache_remove_tx_resets_forced_tx_miss_retry_tracking() {
+        let cache = WalletCache::new();
+        let txid = Txid::all_zeros();
+
+        cache
+            .claim_forced_tx_miss_retry(txid)
+            .expect("record should succeed");
+        cache
+            .extend_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+        cache
+            .claim_forced_tx_miss_retry(txid)
+            .expect("record should succeed");
+
+        cache.remove_tx(&txid).expect("remove should succeed");
+
+        assert!(!cache
+            .forced_tx_miss_retry_recorded(&txid)
+            .expect("lookup should succeed"));
+    }
+
+    #[test]
     fn cache_loaded_script_pubkeys_marks_mask_and_populates_paths() {
         let cache = WalletCache::new();
         let external_script = ScriptBuf::from(vec![0x51]);

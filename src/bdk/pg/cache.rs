@@ -23,6 +23,9 @@ pub(super) struct WalletCache {
     // Txids not yet seen in the in-process cache and not yet known-missing. These are batched
     // before we fall back to recording a miss.
     pending_tx_lookups: Arc<Mutex<HashSet<Txid>>>,
+    // Tracks txids that already consumed their one targeted miss-cache retry in this
+    // SqlxWalletDb lifetime, while still allowing later threshold-driven batch retries.
+    forced_tx_miss_retries: Arc<Mutex<HashSet<Txid>>>,
     // Process-local hint for which keychain script path sets are fully hydrated.
     // Bit 0: external, bit 1: internal.
     // This is intentionally not synchronized across processes.
@@ -53,6 +56,7 @@ impl WalletCache {
             pending_script_misses: Arc::new(Mutex::new(HashSet::new())),
             pending_tx_misses: Arc::new(Mutex::new(HashSet::new())),
             pending_tx_lookups: Arc::new(Mutex::new(HashSet::new())),
+            forced_tx_miss_retries: Arc::new(Mutex::new(HashSet::new())),
             script_pubkeys_loaded_mask: Arc::new(AtomicU8::new(0)),
             raw_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
             summary_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
@@ -107,6 +111,10 @@ impl WalletCache {
 
     fn lock_pending_tx_lookups(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
         self.lock_with_error(&self.pending_tx_lookups, "pending tx lookups cache")
+    }
+
+    fn lock_forced_tx_miss_retries(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
+        self.lock_with_error(&self.forced_tx_miss_retries, "forced tx miss retries cache")
     }
 
     pub(super) fn get_script_pubkey_path(
@@ -189,9 +197,11 @@ impl WalletCache {
     {
         let mut missing = self.lock_missing_txids()?;
         let mut pending = self.lock_pending_tx_misses()?;
+        let mut forced_retries = self.lock_forced_tx_miss_retries()?;
         for txid in txids {
             missing.remove(txid);
             pending.remove(txid);
+            forced_retries.remove(txid);
         }
         Ok(())
     }
@@ -278,6 +288,7 @@ impl WalletCache {
             let mut cache = self.lock_transactions()?;
             cache.remove(txid);
         }
+        self.lock_forced_tx_miss_retries()?.remove(txid);
         self.record_missing_txid(*txid)?;
         Ok(())
     }
@@ -348,10 +359,22 @@ impl WalletCache {
         Ok(pending.contains(txid))
     }
 
+    #[cfg(test)]
+    pub(super) fn forced_tx_miss_retry_recorded(&self, txid: &Txid) -> Result<bool, bdk::Error> {
+        let forced_retries = self.lock_forced_tx_miss_retries()?;
+        Ok(forced_retries.contains(txid))
+    }
+
+    pub(super) fn claim_forced_tx_miss_retry(&self, txid: Txid) -> Result<bool, bdk::Error> {
+        let mut forced_retries = self.lock_forced_tx_miss_retries()?;
+        Ok(forced_retries.insert(txid))
+    }
+
     pub(super) fn mark_txid_not_missing(&self, txid: &Txid) -> Result<(), bdk::Error> {
         self.lock_missing_txids()?.remove(txid);
         self.lock_pending_tx_misses()?.remove(txid);
         self.lock_pending_tx_lookups()?.remove(txid);
+        self.lock_forced_tx_miss_retries()?.remove(txid);
         Ok(())
     }
 
@@ -468,6 +491,7 @@ impl WalletCache {
         Self::clear_even_if_poisoned(&self.pending_script_misses);
         Self::clear_even_if_poisoned(&self.pending_tx_misses);
         Self::clear_even_if_poisoned(&self.pending_tx_lookups);
+        Self::clear_even_if_poisoned(&self.forced_tx_miss_retries);
 
         self.script_pubkeys_loaded_mask.store(0, Ordering::Release);
         self.raw_txs_fully_loaded.store(false, Ordering::Release);

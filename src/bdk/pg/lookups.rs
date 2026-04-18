@@ -312,9 +312,12 @@ impl SqlxWalletDb {
         }
 
         if self.cache.txid_marked_missing(txid)? {
-            if self.cache.pending_tx_miss_queued(txid)?
-                && self.resolve_pending_tx_misses_force(*txid)?
-            {
+            let should_force_miss_retry = if self.cache.pending_tx_miss_queued(txid)? {
+                self.cache.claim_forced_tx_miss_retry(*txid)?
+            } else {
+                false
+            };
+            if should_force_miss_retry && self.resolve_pending_tx_misses_force(*txid)? {
                 if let Some(result) = self.lookup_cached_tx_with_mode(
                     txid,
                     mode,
