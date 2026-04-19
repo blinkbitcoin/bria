@@ -3,29 +3,229 @@ use bdk::{
     KeychainKind, TransactionDetails,
 };
 use std::{
+    borrow::Borrow,
     collections::{HashMap, HashSet},
+    hash::Hash,
     sync::atomic::{AtomicBool, AtomicU8, Ordering},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use super::{ScriptPubkeyCache, SqlxWalletDb, TransactionCache};
 
+struct Tracked<T>(Mutex<T>);
+
+impl<T> Tracked<T> {
+    fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    fn lock(&self, context: &'static str) -> Result<MutexGuard<'_, T>, bdk::Error> {
+        self.0
+            .lock()
+            .map_err(|_| bdk::Error::Generic(format!("{context} lock poisoned")))
+    }
+}
+
+impl<T> Tracked<T>
+where
+    T: Default,
+{
+    fn clear_even_if_poisoned(&self) {
+        let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *guard = T::default();
+        self.0.clear_poison();
+    }
+}
+
+struct PendingSet<T> {
+    inner: Tracked<HashSet<T>>,
+    context: &'static str,
+}
+
+impl<T> PendingSet<T>
+where
+    T: Eq + Hash,
+{
+    fn new(context: &'static str) -> Self {
+        Self {
+            inner: Tracked::new(HashSet::new()),
+            context,
+        }
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, HashSet<T>>, bdk::Error> {
+        self.inner.lock(self.context)
+    }
+
+    fn insert(&self, value: T) -> Result<(), bdk::Error> {
+        self.inner.lock(self.context)?.insert(value);
+        Ok(())
+    }
+
+    fn contains<Q>(&self, value: &Q) -> Result<bool, bdk::Error>
+    where
+        T: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        Ok(self.inner.lock(self.context)?.contains(value))
+    }
+
+    fn drain(&self, max: usize) -> Result<Vec<T>, bdk::Error>
+    where
+        T: Clone,
+    {
+        let mut pending = self.inner.lock(self.context)?;
+        let drained: Vec<_> = pending.iter().take(max).cloned().collect();
+        for value in &drained {
+            pending.remove(value);
+        }
+        Ok(drained)
+    }
+
+    fn requeue<I>(&self, values: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        self.inner.lock(self.context)?.extend(values);
+        Ok(())
+    }
+
+    fn should_batch(&self, threshold: usize) -> Result<bool, bdk::Error> {
+        Ok(self.inner.lock(self.context)?.len() >= threshold)
+    }
+
+    fn clear_even_if_poisoned(&self) {
+        self.inner.clear_even_if_poisoned();
+    }
+}
+
+struct MissTracker<T> {
+    confirmed: Tracked<HashSet<T>>,
+    confirmed_context: &'static str,
+    pending: PendingSet<T>,
+}
+
+impl<T> MissTracker<T>
+where
+    T: Eq + Hash,
+{
+    fn new(confirmed_context: &'static str, pending_context: &'static str) -> Self {
+        Self {
+            confirmed: Tracked::new(HashSet::new()),
+            confirmed_context,
+            pending: PendingSet::new(pending_context),
+        }
+    }
+
+    fn is_missing<Q>(&self, value: &Q) -> Result<bool, bdk::Error>
+    where
+        T: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        Ok(self.confirmed.lock(self.confirmed_context)?.contains(value))
+    }
+
+    fn record(&self, value: T) -> Result<(), bdk::Error> {
+        self.confirmed.lock(self.confirmed_context)?.insert(value);
+        Ok(())
+    }
+
+    fn enqueue_pending(&self, value: T) -> Result<(), bdk::Error> {
+        self.pending.insert(value)
+    }
+
+    fn pending_contains<Q>(&self, value: &Q) -> Result<bool, bdk::Error>
+    where
+        T: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        self.pending.contains(value)
+    }
+
+    fn record_and_enqueue(&self, value: T) -> Result<(), bdk::Error>
+    where
+        T: Clone,
+    {
+        let (mut confirmed, mut pending) = self.lock_both()?;
+        confirmed.insert(value.clone());
+        pending.insert(value);
+        Ok(())
+    }
+
+    fn clear<Q>(&self, value: &Q) -> Result<(), bdk::Error>
+    where
+        T: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        let (mut confirmed, mut pending) = self.lock_both()?;
+        confirmed.remove(value);
+        pending.remove(value);
+        Ok(())
+    }
+
+    fn clear_many<'a, I>(&self, values: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = &'a T>,
+        T: 'a,
+    {
+        let (mut confirmed, mut pending) = self.lock_both()?;
+        for value in values {
+            confirmed.remove(value);
+            pending.remove(value);
+        }
+        Ok(())
+    }
+
+    // LOCK ORDER INVARIANT: always acquire confirmed before pending.
+    // Use this method whenever both guards are needed simultaneously.
+    fn lock_both(
+        &self,
+    ) -> Result<(MutexGuard<'_, HashSet<T>>, MutexGuard<'_, HashSet<T>>), bdk::Error> {
+        let confirmed = self.confirmed.lock(self.confirmed_context)?;
+        let pending = self.pending.lock()?;
+        Ok((confirmed, pending))
+    }
+
+    fn lock_pending(&self) -> Result<MutexGuard<'_, HashSet<T>>, bdk::Error> {
+        self.pending.lock()
+    }
+
+    fn drain_pending(&self, max: usize) -> Result<Vec<T>, bdk::Error>
+    where
+        T: Clone,
+    {
+        self.pending.drain(max)
+    }
+
+    fn requeue_pending<I>(&self, values: I) -> Result<(), bdk::Error>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        self.pending.requeue(values)
+    }
+
+    fn should_batch_pending(&self, threshold: usize) -> Result<bool, bdk::Error> {
+        self.pending.should_batch(threshold)
+    }
+
+    fn clear_even_if_poisoned(&self) {
+        self.confirmed.clear_even_if_poisoned();
+        self.pending.clear_even_if_poisoned();
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct WalletCache {
-    script_pubkeys: Arc<Mutex<ScriptPubkeyCache>>,
-    transactions: Arc<Mutex<TransactionCache>>,
-    missing_script_pubkeys: Arc<Mutex<HashSet<ScriptBuf>>>,
-    missing_txids: Arc<Mutex<HashSet<Txid>>>,
-    pending_script_misses: Arc<Mutex<HashSet<ScriptBuf>>>,
-    // Txids confirmed absent from the DB in this process. These are retried in batches to
-    // recover from races where rows appear after an earlier miss.
-    pending_tx_misses: Arc<Mutex<HashSet<Txid>>>,
+    script_pubkeys: Arc<Tracked<ScriptPubkeyCache>>,
+    transactions: Arc<Tracked<TransactionCache>>,
+    script_misses: Arc<MissTracker<ScriptBuf>>,
+    tx_misses: Arc<MissTracker<Txid>>,
     // Txids not yet seen in the in-process cache and not yet known-missing. These are batched
     // before we fall back to recording a miss.
-    pending_tx_lookups: Arc<Mutex<HashSet<Txid>>>,
+    pending_tx_lookups: Arc<Tracked<HashSet<Txid>>>,
     // Tracks txids that already consumed their one targeted miss-cache retry in this
     // SqlxWalletDb lifetime, while still allowing later threshold-driven batch retries.
-    forced_tx_miss_retries: Arc<Mutex<HashSet<Txid>>>,
+    forced_tx_miss_retries: Arc<Tracked<HashSet<Txid>>>,
     // Process-local hint for which keychain script path sets are fully hydrated.
     // Bit 0: external, bit 1: internal.
     // This is intentionally not synchronized across processes.
@@ -38,39 +238,24 @@ pub(super) struct WalletCache {
 }
 
 impl WalletCache {
-    fn clear_even_if_poisoned<T>(mutex: &Mutex<T>)
-    where
-        T: Default,
-    {
-        let mut guard = mutex.lock().unwrap_or_else(PoisonError::into_inner);
-        *guard = T::default();
-        mutex.clear_poison();
-    }
-
     pub(super) fn new() -> Self {
         Self {
-            script_pubkeys: Arc::new(Mutex::new(HashMap::new())),
-            transactions: Arc::new(Mutex::new(HashMap::new())),
-            missing_script_pubkeys: Arc::new(Mutex::new(HashSet::new())),
-            missing_txids: Arc::new(Mutex::new(HashSet::new())),
-            pending_script_misses: Arc::new(Mutex::new(HashSet::new())),
-            pending_tx_misses: Arc::new(Mutex::new(HashSet::new())),
-            pending_tx_lookups: Arc::new(Mutex::new(HashSet::new())),
-            forced_tx_miss_retries: Arc::new(Mutex::new(HashSet::new())),
+            script_pubkeys: Arc::new(Tracked::new(HashMap::new())),
+            transactions: Arc::new(Tracked::new(HashMap::new())),
+            script_misses: Arc::new(MissTracker::new(
+                "missing script pubkeys cache",
+                "pending script misses cache",
+            )),
+            tx_misses: Arc::new(MissTracker::new(
+                "missing txids cache",
+                "pending tx misses cache",
+            )),
+            pending_tx_lookups: Arc::new(Tracked::new(HashSet::new())),
+            forced_tx_miss_retries: Arc::new(Tracked::new(HashSet::new())),
             script_pubkeys_loaded_mask: Arc::new(AtomicU8::new(0)),
             raw_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
             summary_txs_fully_loaded: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    fn lock_with_error<'a, T>(
-        &self,
-        mutex: &'a Mutex<T>,
-        context: &'static str,
-    ) -> Result<MutexGuard<'a, T>, bdk::Error> {
-        mutex
-            .lock()
-            .map_err(|_| bdk::Error::Generic(format!("{context} lock poisoned")))
     }
 
     fn script_pubkey_mask_for(keychain: Option<KeychainKind>) -> u8 {
@@ -84,37 +269,24 @@ impl WalletCache {
     }
 
     fn lock_script_pubkeys(&self) -> Result<MutexGuard<'_, ScriptPubkeyCache>, bdk::Error> {
-        self.lock_with_error(&self.script_pubkeys, "script pubkeys cache")
+        self.script_pubkeys.lock("script pubkeys cache")
     }
 
     fn lock_transactions(&self) -> Result<MutexGuard<'_, TransactionCache>, bdk::Error> {
-        self.lock_with_error(&self.transactions, "transactions cache")
-    }
-
-    fn lock_missing_script_pubkeys(
-        &self,
-    ) -> Result<MutexGuard<'_, HashSet<ScriptBuf>>, bdk::Error> {
-        self.lock_with_error(&self.missing_script_pubkeys, "missing script pubkeys cache")
-    }
-
-    fn lock_missing_txids(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
-        self.lock_with_error(&self.missing_txids, "missing txids cache")
-    }
-
-    fn lock_pending_script_misses(&self) -> Result<MutexGuard<'_, HashSet<ScriptBuf>>, bdk::Error> {
-        self.lock_with_error(&self.pending_script_misses, "pending script misses cache")
+        self.transactions.lock("transactions cache")
     }
 
     fn lock_pending_tx_misses(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
-        self.lock_with_error(&self.pending_tx_misses, "pending tx misses cache")
+        self.tx_misses.lock_pending()
     }
 
     fn lock_pending_tx_lookups(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
-        self.lock_with_error(&self.pending_tx_lookups, "pending tx lookups cache")
+        self.pending_tx_lookups.lock("pending tx lookups cache")
     }
 
     fn lock_forced_tx_miss_retries(&self) -> Result<MutexGuard<'_, HashSet<Txid>>, bdk::Error> {
-        self.lock_with_error(&self.forced_tx_miss_retries, "forced tx miss retries cache")
+        self.forced_tx_miss_retries
+            .lock("forced tx miss retries cache")
     }
 
     pub(super) fn get_script_pubkey_path(
@@ -142,13 +314,7 @@ impl WalletCache {
     where
         I: IntoIterator<Item = &'a ScriptBuf>,
     {
-        let mut missing = self.lock_missing_script_pubkeys()?;
-        let mut pending = self.lock_pending_script_misses()?;
-        for script in scripts {
-            missing.remove(script.as_script());
-            pending.remove(script);
-        }
-        Ok(())
+        self.script_misses.clear_many(scripts)
     }
 
     pub(super) fn extend_script_pubkeys<I>(&self, entries: I) -> Result<(), bdk::Error>
@@ -156,7 +322,11 @@ impl WalletCache {
         I: IntoIterator<Item = (ScriptBuf, (KeychainKind, u32))>,
     {
         let entries: Vec<_> = entries.into_iter().collect();
+        // Miss tracking is cleared before cache insertion. Concurrent readers may briefly
+        // observe a mismatch between miss-tracking state and cache contents.
         self.clear_script_miss_tracking(entries.iter().map(|(script, _)| script))?;
+        #[cfg(test)]
+        test_support::pause_at(test_support::HookPoint::BeforeExtendScriptPubkeysInsert);
         let mut cache = self.lock_script_pubkeys()?;
         cache.extend(entries);
         Ok(())
@@ -191,16 +361,24 @@ impl WalletCache {
         Ok(cache.get(txid).cloned())
     }
 
+    #[cfg(test)]
+    pub(super) fn insert_tx(&self, txid: Txid, tx: TransactionDetails) -> Result<(), bdk::Error> {
+        {
+            let mut cache = self.lock_transactions()?;
+            cache.insert(txid, tx);
+        }
+        self.mark_txid_not_missing(&txid)?;
+        Ok(())
+    }
+
     fn clear_tx_miss_tracking<'a, I>(&self, txids: I) -> Result<(), bdk::Error>
     where
         I: IntoIterator<Item = &'a Txid>,
     {
-        let mut missing = self.lock_missing_txids()?;
-        let mut pending = self.lock_pending_tx_misses()?;
+        let txids: Vec<_> = txids.into_iter().copied().collect();
+        self.tx_misses.clear_many(txids.iter())?;
         let mut forced_retries = self.lock_forced_tx_miss_retries()?;
-        for txid in txids {
-            missing.remove(txid);
-            pending.remove(txid);
+        for txid in &txids {
             forced_retries.remove(txid);
         }
         Ok(())
@@ -222,8 +400,12 @@ impl WalletCache {
         I: IntoIterator<Item = (Txid, TransactionDetails)>,
     {
         let entries: Vec<_> = entries.into_iter().collect();
+        // Miss tracking is cleared before cache insertion. Concurrent readers may briefly
+        // observe a mismatch between miss-tracking state and cache contents.
         self.clear_tx_miss_tracking(entries.iter().map(|(txid, _)| txid))?;
         self.clear_pending_tx_lookups(entries.iter().map(|(txid, _)| txid))?;
+        #[cfg(test)]
+        test_support::pause_at(test_support::HookPoint::BeforeExtendTxsInsert);
         let mut cache = self.lock_transactions()?;
         cache.extend(entries);
         Ok(())
@@ -234,8 +416,12 @@ impl WalletCache {
         I: IntoIterator<Item = (Txid, TransactionDetails)>,
     {
         let entries: Vec<_> = entries.into_iter().collect();
+        // Miss tracking is cleared before cache insertion. Concurrent readers may briefly
+        // observe a mismatch between miss-tracking state and cache contents.
         self.clear_tx_miss_tracking(entries.iter().map(|(txid, _)| txid))?;
         self.clear_pending_tx_lookups(entries.iter().map(|(txid, _)| txid))?;
+        #[cfg(test)]
+        test_support::pause_at(test_support::HookPoint::BeforeExtendSummaryTxsInsert);
         let mut cache = self.lock_transactions()?;
         for (txid, mut summary) in entries {
             // Summary refreshes may run after raw tx bytes were already hydrated. Preserve any
@@ -296,69 +482,57 @@ impl WalletCache {
     }
 
     pub(super) fn script_marked_missing(&self, script: &Script) -> Result<bool, bdk::Error> {
-        let missing = self.lock_missing_script_pubkeys()?;
-        Ok(missing.contains(script))
+        self.script_misses.is_missing(script)
     }
 
     pub(super) fn record_missing_script(&self, script: ScriptBuf) -> Result<(), bdk::Error> {
-        self.lock_missing_script_pubkeys()?.insert(script);
-        Ok(())
+        self.script_misses.record(script)
     }
 
     pub(super) fn record_and_enqueue_missing_script(
         &self,
         script: ScriptBuf,
     ) -> Result<(), bdk::Error> {
-        self.lock_missing_script_pubkeys()?.insert(script.clone());
-        self.lock_pending_script_misses()?.insert(script);
-        Ok(())
+        self.script_misses.record_and_enqueue(script)
     }
 
     pub(super) fn mark_script_not_missing(&self, script: &Script) -> Result<(), bdk::Error> {
-        self.lock_missing_script_pubkeys()?.remove(script);
-        self.lock_pending_script_misses()?.remove(script);
-        Ok(())
+        self.script_misses.clear(script)
     }
 
     pub(super) fn drain_pending_script_misses(
         &self,
         max: usize,
     ) -> Result<Vec<ScriptBuf>, bdk::Error> {
-        let mut pending = self.lock_pending_script_misses()?;
-        let drained: Vec<_> = pending.iter().take(max).cloned().collect();
-        for script in &drained {
-            pending.remove(script);
-        }
-        Ok(drained)
+        self.script_misses.drain_pending(max)
     }
 
     pub(super) fn requeue_pending_script_misses<I>(&self, scripts: I) -> Result<(), bdk::Error>
     where
         I: IntoIterator<Item = ScriptBuf>,
     {
-        let mut pending = self.lock_pending_script_misses()?;
-        pending.extend(scripts);
-        Ok(())
+        self.script_misses.requeue_pending(scripts)
     }
 
     pub(super) fn txid_marked_missing(&self, txid: &Txid) -> Result<bool, bdk::Error> {
-        let missing = self.lock_missing_txids()?;
-        Ok(missing.contains(txid))
+        self.tx_misses.is_missing(txid)
     }
 
     pub(super) fn record_missing_txid(&self, txid: Txid) -> Result<(), bdk::Error> {
-        self.lock_missing_txids()?.insert(txid);
-        Ok(())
+        self.tx_misses.record(txid)
     }
 
     pub(super) fn enqueue_pending_tx_miss(&self, txid: Txid) -> Result<(), bdk::Error> {
-        self.lock_pending_tx_misses()?.insert(txid);
-        Ok(())
+        self.tx_misses.enqueue_pending(txid)
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_and_enqueue_missing_txid(&self, txid: Txid) -> Result<(), bdk::Error> {
+        self.tx_misses.record_and_enqueue(txid)
     }
 
     pub(super) fn pending_tx_miss_queued(&self, txid: &Txid) -> Result<bool, bdk::Error> {
-        let pending = self.lock_pending_tx_misses()?;
-        Ok(pending.contains(txid))
+        self.tx_misses.pending_contains(txid)
     }
 
     #[cfg(test)]
@@ -373,8 +547,7 @@ impl WalletCache {
     }
 
     pub(super) fn mark_txid_not_missing(&self, txid: &Txid) -> Result<(), bdk::Error> {
-        self.lock_missing_txids()?.remove(txid);
-        self.lock_pending_tx_misses()?.remove(txid);
+        self.tx_misses.clear(txid)?;
         self.lock_pending_tx_lookups()?.remove(txid);
         self.lock_forced_tx_miss_retries()?.remove(txid);
         Ok(())
@@ -424,12 +597,7 @@ impl WalletCache {
     }
 
     pub(super) fn drain_pending_tx_misses(&self, max: usize) -> Result<Vec<Txid>, bdk::Error> {
-        let mut pending = self.lock_pending_tx_misses()?;
-        let drained: Vec<_> = pending.iter().take(max).copied().collect();
-        for txid in &drained {
-            pending.remove(txid);
-        }
-        Ok(drained)
+        self.tx_misses.drain_pending(max)
     }
 
     pub(super) fn drain_pending_tx_misses_including(
@@ -456,25 +624,21 @@ impl WalletCache {
     where
         I: IntoIterator<Item = Txid>,
     {
-        let mut pending = self.lock_pending_tx_misses()?;
-        pending.extend(txids);
-        Ok(())
+        self.tx_misses.requeue_pending(txids)
     }
 
     pub(super) fn should_batch_resolve_script_misses(
         &self,
         threshold: usize,
     ) -> Result<bool, bdk::Error> {
-        let pending = self.lock_pending_script_misses()?;
-        Ok(pending.len() >= threshold)
+        self.script_misses.should_batch_pending(threshold)
     }
 
     pub(super) fn should_batch_resolve_tx_misses(
         &self,
         threshold: usize,
     ) -> Result<bool, bdk::Error> {
-        let pending = self.lock_pending_tx_misses()?;
-        Ok(pending.len() >= threshold)
+        self.tx_misses.should_batch_pending(threshold)
     }
 
     pub(super) fn should_batch_resolve_tx_lookups(
@@ -486,18 +650,141 @@ impl WalletCache {
     }
 
     pub(super) fn invalidate(&self) {
-        Self::clear_even_if_poisoned(&self.script_pubkeys);
-        Self::clear_even_if_poisoned(&self.transactions);
-        Self::clear_even_if_poisoned(&self.missing_script_pubkeys);
-        Self::clear_even_if_poisoned(&self.missing_txids);
-        Self::clear_even_if_poisoned(&self.pending_script_misses);
-        Self::clear_even_if_poisoned(&self.pending_tx_misses);
-        Self::clear_even_if_poisoned(&self.pending_tx_lookups);
-        Self::clear_even_if_poisoned(&self.forced_tx_miss_retries);
+        self.script_pubkeys.clear_even_if_poisoned();
+        self.transactions.clear_even_if_poisoned();
+        self.script_misses.clear_even_if_poisoned();
+        self.tx_misses.clear_even_if_poisoned();
+        self.pending_tx_lookups.clear_even_if_poisoned();
+        self.forced_tx_miss_retries.clear_even_if_poisoned();
 
         self.script_pubkeys_loaded_mask.store(0, Ordering::Release);
         self.raw_txs_fully_loaded.store(false, Ordering::Release);
         self.summary_txs_fully_loaded
             .store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::{Condvar, OnceLock};
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub(crate) enum HookPoint {
+        BeforeExtendScriptPubkeysInsert,
+        BeforeExtendTxsInsert,
+        BeforeExtendSummaryTxsInsert,
+    }
+
+    #[derive(Default)]
+    struct HookState {
+        reached: bool,
+        released: bool,
+    }
+
+    struct InstalledChannels {
+        state: Mutex<HookState>,
+        signal: Condvar,
+    }
+
+    fn hooks() -> &'static Mutex<HashMap<HookPoint, Arc<InstalledChannels>>> {
+        static HOOKS: OnceLock<Mutex<HashMap<HookPoint, Arc<InstalledChannels>>>> = OnceLock::new();
+        HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn serial() -> &'static Mutex<()> {
+        static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+        SERIAL.get_or_init(|| Mutex::new(()))
+    }
+
+    pub(crate) struct InstalledHook {
+        point: HookPoint,
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    impl InstalledHook {
+        pub(crate) fn wait_until_reached(&self) {
+            let hook = hooks()
+                .lock()
+                .expect("hooks lock should succeed")
+                .get(&self.point)
+                .cloned()
+                .expect("hook should stay installed while waiting");
+            let mut state = hook.state.lock().expect("state lock should succeed");
+            while !state.reached {
+                state = hook.signal.wait(state).expect("wait should succeed");
+            }
+        }
+
+        pub(crate) fn release(&mut self) {
+            let hook = hooks()
+                .lock()
+                .expect("hooks lock should succeed")
+                .get(&self.point)
+                .cloned();
+            let Some(hook) = hook else {
+                return;
+            };
+
+            let mut state = hook.state.lock().expect("state lock should succeed");
+            state.released = true;
+            hook.signal.notify_all();
+        }
+    }
+
+    impl Drop for InstalledHook {
+        fn drop(&mut self) {
+            if let Some(hook) = hooks()
+                .lock()
+                .expect("hooks lock should succeed")
+                .remove(&self.point)
+            {
+                let mut state = hook.state.lock().expect("state lock should succeed");
+                state.released = true;
+                hook.signal.notify_all();
+            }
+        }
+    }
+
+    pub(crate) fn install_hook(point: HookPoint) -> InstalledHook {
+        let serial = serial().lock().unwrap_or_else(PoisonError::into_inner);
+        let hook = Arc::new(InstalledChannels {
+            state: Mutex::new(HookState::default()),
+            signal: Condvar::new(),
+        });
+
+        let previous = hooks()
+            .lock()
+            .expect("hooks lock should succeed")
+            .insert(point, hook);
+        assert!(
+            previous.is_none(),
+            "test hook already installed for {point:?}"
+        );
+
+        InstalledHook {
+            point,
+            _serial: serial,
+        }
+    }
+
+    pub(super) fn pause_at(point: HookPoint) {
+        let hook = hooks()
+            .lock()
+            .expect("hooks lock should succeed")
+            .get(&point)
+            .cloned();
+        let Some(hook) = hook else {
+            return;
+        };
+
+        let mut state = hook.state.lock().expect("state lock should succeed");
+        if !state.reached {
+            state.reached = true;
+            hook.signal.notify_all();
+        }
+        while !state.released {
+            state = hook.signal.wait(state).expect("wait should succeed");
+        }
     }
 }
