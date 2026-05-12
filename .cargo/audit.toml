@@ -5,4 +5,5 @@ ignore = [
     # TODO: remove once electrum-client/bdk stops pulling rustls-webpki 0.101.7
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
 ]
