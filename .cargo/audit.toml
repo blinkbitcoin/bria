@@ -6,4 +6,6 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    # rkyv is an inactive optional rust_decimal dependency with no patched 0.7 release
+    "RUSTSEC-2026-0235",
 ]
