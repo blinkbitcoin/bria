@@ -498,7 +498,8 @@ wallet_effective_settled_is_not() {
 
 signer_unconfirmed_balance_is() {
   local expected="$1"
-  [[ "$(bitcoin_signer_cli getunconfirmedbalance)" == "${expected}" ]]
+  bitcoin_signer_cli getbalances |
+    jq -e --argjson expected "${expected}" '.mine.untrusted_pending == $expected' >/dev/null
 }
 
 wallet_effective_settled_matches_signer_balance() {
