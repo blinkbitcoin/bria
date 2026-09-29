@@ -1,11 +1,16 @@
 [advisories]
 ignore = [
+    # sqlx-mysql pulls rsa 0.9; no patched release is available.
+    # Remove when sqlx drops rsa or resolves a release patched for this advisory.
     "RUSTSEC-2023-0071",
-    "RUSTSEC-2026-0049",
-    # TODO: remove once electrum-client/bdk stops pulling rustls-webpki 0.101.7
+    # electrum-client 0.18 (also via bdk 0.30) pulls rustls-webpki 0.101.7.
+    # URI name constraints: remove when that path uses a patched webpki release.
     "RUSTSEC-2026-0098",
+    # Same Electrum TLS path; remove when wildcard name constraints are patched.
     "RUSTSEC-2026-0099",
+    # Same Electrum TLS path; remove when the CRL parsing panic is patched.
     "RUSTSEC-2026-0104",
-    # rkyv is an inactive optional rust_decimal dependency with no patched 0.7 release
+    # rust_decimal locks optional rkyv 0.7, inactive in the current feature tree.
+    # Remove when rust_decimal drops it or resolves patched rkyv >=0.8.17.
     "RUSTSEC-2026-0235",
 ]
