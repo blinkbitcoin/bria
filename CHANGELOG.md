@@ -1,3 +1,22 @@
+# [bria release v0.1.139](https://github.com/blinkbitcoin/bria/releases/tag/0.1.139)
+
+
+### Bug Fixes
+
+- Upgrade transport dependencies to pass security audit (#73)
+- Correct chart Git get and repipe target (#72)
+- Address cargo audit failures (#68)
+- Address rustls-webpki audit failures (#63)
+
+### Miscellaneous Tasks
+
+- Bump rustls, rustls-webpki, webpki-roots and quinn-proto (#74)
+
+### Testing
+
+- Bitcoind update to v31.1 (#65)
+- Bitcoind update to 28.4 (#62)
+
 # [bria release v0.1.138](https://github.com/blinkbitcoin/bria/releases/tag/0.1.138)
 
 
