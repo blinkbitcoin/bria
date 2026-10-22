@@ -10,6 +10,12 @@ ignore = [
     "RUSTSEC-2026-0099",
     # Same Electrum TLS path; remove when the CRL parsing panic is patched.
     "RUSTSEC-2026-0104",
+    # Same Electrum TLS path (rustls 0.21, webpki-roots 0.22); fixes need rustls 0.23.
+    # Remove when electrum-client / bdk move to rustls 0.23.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0349",
+    "RUSTSEC-2026-0381",
+    "RUSTSEC-2026-0382",
     # rust_decimal locks optional rkyv 0.7, inactive in the current feature tree.
     # Remove when rust_decimal drops it or resolves patched rkyv >=0.8.17.
     "RUSTSEC-2026-0235",
