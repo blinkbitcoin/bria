@@ -138,7 +138,10 @@ impl SqlxWalletDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bdk::pg::cache::test_support::{install_hook, HookPoint};
     use bdk::bitcoin::hashes::Hash;
+    use std::collections::HashSet;
+    use std::thread;
 
     fn tx_details(txid: Txid) -> TransactionDetails {
         TransactionDetails {
@@ -569,5 +572,301 @@ mod tests {
             .drain_pending_tx_misses(1)
             .expect("drain should succeed");
         assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn wallet_cache_extend_script_pubkeys_clears_script_miss_tracking() {
+        let cache = WalletCache::new();
+        let script = ScriptBuf::from(vec![0x51]);
+
+        cache
+            .record_and_enqueue_missing_script(script.clone())
+            .expect("mark should succeed");
+        assert!(cache
+            .script_marked_missing(script.as_script())
+            .expect("lookup should succeed"));
+
+        cache
+            .extend_script_pubkeys([(script.clone(), (KeychainKind::External, 7))])
+            .expect("extend should succeed");
+
+        assert!(!cache
+            .script_marked_missing(script.as_script())
+            .expect("lookup should succeed"));
+        let drained = cache
+            .drain_pending_script_misses(1)
+            .expect("drain should succeed");
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn wallet_cache_insert_script_pubkey_clears_script_miss_tracking() {
+        let cache = WalletCache::new();
+        let script = ScriptBuf::from(vec![0x53]);
+
+        cache
+            .record_and_enqueue_missing_script(script.clone())
+            .expect("mark should succeed");
+
+        cache
+            .insert_script_pubkey(script.clone(), (KeychainKind::External, 11))
+            .expect("insert should succeed");
+
+        assert!(!cache
+            .script_marked_missing(script.as_script())
+            .expect("lookup should succeed"));
+        let drained = cache
+            .drain_pending_script_misses(10)
+            .expect("drain should succeed");
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn wallet_cache_extend_txs_clears_tx_miss_tracking() {
+        let cache = WalletCache::new();
+        let txid = Txid::from_slice(&[2; 32]).expect("valid txid");
+
+        cache
+            .record_and_enqueue_missing_txid(txid)
+            .expect("mark should succeed");
+
+        cache
+            .extend_txs([(txid, tx_details(txid))])
+            .expect("extend should succeed");
+
+        assert!(!cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+        let drained = cache
+            .drain_pending_tx_misses(10)
+            .expect("drain should succeed");
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn wallet_cache_remove_tx_records_miss() {
+        let cache = WalletCache::new();
+        let txid = Txid::from_slice(&[3; 32]).expect("valid txid");
+
+        cache
+            .insert_tx(txid, tx_details(txid))
+            .expect("insert should succeed");
+        assert!(!cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+
+        cache.remove_tx(&txid).expect("remove should succeed");
+
+        assert!(cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+    }
+
+    #[test]
+    fn wallet_cache_requeue_and_drain_roundtrip_scripts() {
+        let cache = WalletCache::new();
+        let scripts = [
+            ScriptBuf::from(vec![0x61]),
+            ScriptBuf::from(vec![0x62]),
+            ScriptBuf::from(vec![0x63]),
+        ];
+
+        for script in scripts.iter().cloned() {
+            cache
+                .record_and_enqueue_missing_script(script)
+                .expect("mark should succeed");
+        }
+
+        let drained = cache
+            .drain_pending_script_misses(2)
+            .expect("drain should succeed");
+        assert_eq!(drained.len(), 2);
+
+        cache
+            .requeue_pending_script_misses(drained)
+            .expect("requeue should succeed");
+
+        let roundtrip = cache
+            .drain_pending_script_misses(10)
+            .expect("drain should succeed");
+        let expected: HashSet<_> = scripts.into_iter().collect();
+        let actual: HashSet<_> = roundtrip.into_iter().collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wallet_cache_invalidate_resets_all_state() {
+        let cache = WalletCache::new();
+        let script = ScriptBuf::from(vec![0x71]);
+        let missing_script = ScriptBuf::from(vec![0x72]);
+        let txid = Txid::from_slice(&[4; 32]).expect("valid txid");
+        let missing_txid = Txid::from_slice(&[5; 32]).expect("valid txid");
+
+        cache
+            .insert_script_pubkey(script.clone(), (KeychainKind::External, 21))
+            .expect("insert should succeed");
+        cache
+            .insert_tx(txid, tx_details(txid))
+            .expect("insert should succeed");
+        cache
+            .record_and_enqueue_missing_script(missing_script.clone())
+            .expect("mark should succeed");
+        cache
+            .record_and_enqueue_missing_txid(missing_txid)
+            .expect("mark should succeed");
+        cache.mark_script_pubkeys_loaded(None);
+        cache.set_raw_txs_fully_loaded();
+
+        cache.invalidate();
+
+        assert_eq!(
+            cache
+                .get_script_pubkey_path(script.as_script())
+                .expect("lookup should succeed"),
+            None
+        );
+        assert_eq!(cache.get_tx(&txid).expect("lookup should succeed"), None);
+        assert!(!cache
+            .script_marked_missing(missing_script.as_script())
+            .expect("lookup should succeed"));
+        assert!(!cache
+            .txid_marked_missing(&missing_txid)
+            .expect("lookup should succeed"));
+        assert!(cache
+            .drain_pending_script_misses(10)
+            .expect("drain should succeed")
+            .is_empty());
+        assert!(cache
+            .drain_pending_tx_misses(10)
+            .expect("drain should succeed")
+            .is_empty());
+        assert!(!cache.script_pubkeys_fully_loaded(None));
+        assert!(!cache.raw_txs_fully_loaded());
+        assert!(!cache.summary_txs_fully_loaded());
+    }
+
+    #[test]
+    fn wallet_cache_extend_script_pubkeys_preserves_late_rerecorded_script_miss() {
+        let cache = WalletCache::new();
+        let script = ScriptBuf::from(vec![0x81]);
+        let path = (KeychainKind::External, 31);
+        let mut hook = install_hook(HookPoint::BeforeExtendScriptPubkeysInsert);
+
+        let worker_cache = cache.clone();
+        let worker_script = script.clone();
+        let handle = thread::spawn(move || {
+            worker_cache
+                .extend_script_pubkeys([(worker_script, path)])
+                .expect("extend should succeed");
+        });
+
+        hook.wait_until_reached();
+        cache
+            .record_and_enqueue_missing_script(script.clone())
+            .expect("mark should succeed");
+        hook.release();
+        handle.join().expect("worker should join");
+
+        assert_eq!(
+            cache
+                .get_script_pubkey_path(script.as_script())
+                .expect("lookup should succeed"),
+            Some(path)
+        );
+        assert!(cache
+            .script_marked_missing(script.as_script())
+            .expect("lookup should succeed"));
+        let drained = cache
+            .drain_pending_script_misses(10)
+            .expect("drain should succeed");
+        assert_eq!(drained, vec![script]);
+    }
+
+    #[test]
+    fn wallet_cache_extend_txs_preserves_late_rerecorded_tx_miss() {
+        let cache = WalletCache::new();
+        let txid = Txid::from_slice(&[6; 32]).expect("valid txid");
+        let mut hook = install_hook(HookPoint::BeforeExtendTxsInsert);
+
+        let worker_cache = cache.clone();
+        let handle = thread::spawn(move || {
+            worker_cache
+                .extend_txs([(txid, tx_details(txid))])
+                .expect("extend should succeed");
+        });
+
+        hook.wait_until_reached();
+        cache
+            .record_and_enqueue_missing_txid(txid)
+            .expect("mark should succeed");
+        hook.release();
+        handle.join().expect("worker should join");
+
+        assert_eq!(
+            cache.get_tx(&txid).expect("lookup should succeed"),
+            Some(tx_details(txid))
+        );
+        assert!(cache
+            .txid_marked_missing(&txid)
+            .expect("lookup should succeed"));
+        let drained = cache
+            .drain_pending_tx_misses(10)
+            .expect("drain should succeed");
+        assert_eq!(drained, vec![txid]);
+    }
+
+    #[test]
+    fn wallet_cache_extend_summary_txs_preserves_raw_tx_during_concurrent_style_update() {
+        let cache = WalletCache::new();
+        let txid = Txid::from_slice(&[7; 32]).expect("valid txid");
+        let mut hook = install_hook(HookPoint::BeforeExtendSummaryTxsInsert);
+
+        let mut summary = tx_details(txid);
+        summary.received = 99;
+        summary.sent = 12;
+        summary.fee = Some(5);
+        summary.confirmation_time = Some(bdk::BlockTime {
+            height: 200,
+            timestamp: 456,
+        });
+
+        let worker_cache = cache.clone();
+        let handle = thread::spawn(move || {
+            worker_cache
+                .extend_summary_txs([(txid, summary)])
+                .expect("extend should succeed");
+        });
+
+        hook.wait_until_reached();
+        let raw_tx = bdk::bitcoin::Transaction {
+            version: 2,
+            lock_time: bdk::bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let mut raw_details = tx_details(txid);
+        raw_details.transaction = Some(raw_tx.clone());
+        raw_details.received = 1;
+        cache
+            .insert_tx(txid, raw_details)
+            .expect("insert should succeed");
+        hook.release();
+        handle.join().expect("worker should join");
+
+        let merged = cache
+            .get_tx(&txid)
+            .expect("lookup should succeed")
+            .expect("tx should exist");
+        assert_eq!(merged.transaction, Some(raw_tx));
+        assert_eq!(merged.received, 99);
+        assert_eq!(merged.sent, 12);
+        assert_eq!(merged.fee, Some(5));
+        assert_eq!(
+            merged.confirmation_time,
+            Some(bdk::BlockTime {
+                height: 200,
+                timestamp: 456,
+            })
+        );
     }
 }
