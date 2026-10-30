@@ -84,3 +84,7 @@ wiremock = "0.6"
 [build-dependencies]
 protobuf-src = { version = "1.1.0" }
 tonic-build = { version = "0.12.3", features = ["prost"] }
+
+[patch.crates-io]
+# sqlx-core 0.8.2 with the TLS poll_ready fix from launchbadge/sqlx#4251; drop on sqlx >= 0.9.
+sqlx-core = { path = "vendor/sqlx-core" }
