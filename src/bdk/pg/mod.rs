@@ -136,6 +136,9 @@ impl SqlxWalletDb {
 }
 
 #[cfg(test)]
+mod tls_commit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bdk::bitcoin::hashes::Hash;
