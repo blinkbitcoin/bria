@@ -1,4 +1,5 @@
 mod cache;
+mod commit_watch;
 mod convert;
 mod db_traits;
 mod descriptor_checksum;
@@ -18,6 +19,7 @@ use tokio::runtime::Handle;
 
 use crate::primitives::*;
 use cache::WalletCache;
+pub use commit_watch::CommitStats;
 use descriptor_checksum::DescriptorChecksums;
 use index::Indexes;
 use lookups::MissResolutionPolicy;
@@ -35,6 +37,7 @@ struct WalletDbContext {
     rt: Handle,
     pool: PgPool,
     keychain_id: KeychainId,
+    wallet_id: Option<WalletId>,
 }
 
 impl WalletDbContext {
@@ -43,6 +46,7 @@ impl WalletDbContext {
             rt: Handle::current(),
             pool,
             keychain_id,
+            wallet_id: None,
         }
     }
 }
@@ -59,6 +63,7 @@ pub struct SqlxWalletDb {
     cache: WalletCache,
     batch: WalletBatchState,
     miss_resolution: MissResolutionPolicy,
+    commit_stats: CommitStats,
 }
 
 impl SqlxWalletDb {
@@ -72,7 +77,18 @@ impl SqlxWalletDb {
             cache: WalletCache::new(),
             batch: WalletBatchState::default(),
             miss_resolution: MissResolutionPolicy::default(),
+            commit_stats: CommitStats::default(),
         }
+    }
+
+    pub fn with_wallet_id(mut self, wallet_id: WalletId) -> Self {
+        self.ctx.wallet_id = Some(wallet_id);
+        self
+    }
+
+    // Totals of all batches committed through this db.
+    pub fn commit_stats(&self) -> CommitStats {
+        self.commit_stats
     }
 
     pub fn tx_count(&self) -> Result<i64, bdk::Error> {

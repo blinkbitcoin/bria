@@ -15,8 +15,8 @@ use crate::{
     bdk::{
         error::BdkError,
         pg::{
-            ConfirmedIncomeUtxo, ConfirmedSpendTransaction, Transactions, UnsyncedTransaction,
-            Utxos as BdkUtxos,
+            CommitStats, ConfirmedIncomeUtxo, ConfirmedSpendTransaction, Transactions,
+            UnsyncedTransaction, Utxos as BdkUtxos,
         },
     },
     fees::{self, FeesClient},
@@ -90,7 +90,11 @@ const MAX_TXS_PER_SYNC: usize = 200;
         n_confirmed_utxos,
         n_found_txs,
         has_more,
-        current_height
+        current_height,
+        commit_bytes,
+        commit_n_txs,
+        commit_n_utxos,
+        commit_n_addresses
     ),
     err
 )]
@@ -114,6 +118,7 @@ pub async fn execute(
 
     let wallet = wallets.find_by_id(data.wallet_id).await?;
     let mut trackers = InstrumentationTrackers::new();
+    let mut commit_stats = CommitStats::default();
     let deps = Deps {
         blockchain_cfg,
         bria_addresses,
@@ -136,7 +141,14 @@ pub async fn execute(
             .sync(blockchain, progress_context.clone())
             .await
         {
-            Ok(()) => info!(%sync_run_id, %keychain_id, "wallet sync phase completed"),
+            Ok(stats) => {
+                commit_stats += stats;
+                span.record("commit_bytes", commit_stats.bytes);
+                span.record("commit_n_txs", commit_stats.n_txs);
+                span.record("commit_n_utxos", commit_stats.n_utxos);
+                span.record("commit_n_addresses", commit_stats.n_addresses);
+                info!(%sync_run_id, %keychain_id, "wallet sync phase completed")
+            }
             Err(err) => {
                 error!(%sync_run_id, %keychain_id, error = %err, "wallet sync phase failed");
                 return Err(err.into());

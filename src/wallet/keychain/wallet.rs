@@ -11,7 +11,10 @@ use uuid::Uuid;
 
 use super::config::*;
 use crate::{
-    bdk::{error::BdkError, pg::SqlxWalletDb},
+    bdk::{
+        error::BdkError,
+        pg::{CommitStats, SqlxWalletDb},
+    },
     primitives::{bitcoin::*, *},
 };
 
@@ -232,11 +235,11 @@ impl KeychainWallet {
         &self,
         blockchain: B,
         context: SyncProgressContext,
-    ) -> Result<(), BdkError> {
+    ) -> Result<CommitStats, BdkError> {
         let sync_span = tracing::Span::current();
         let wallet_id = self.wallet_id;
         let keychain_id = self.keychain_id;
-        self.with_wallet(move |wallet| {
+        let stats = self.with_wallet(move |wallet| {
             let _span_guard = sync_span.enter();
             let last_external = wallet
                 .database()
@@ -287,10 +290,11 @@ impl KeychainWallet {
                 SyncOptions {
                     progress: Some(Box::new(progress)),
                 },
-            )
+            )?;
+            Ok::<_, bdk::Error>(wallet.database().commit_stats())
         })
         .await??;
-        Ok(())
+        Ok(stats)
     }
 
     #[instrument(name = "keychain_wallet.balance", skip_all)]
@@ -316,13 +320,14 @@ impl KeychainWallet {
         let internal = self.config.internal_descriptor();
         let pool = self.pool.clone();
         let keychain_id = self.keychain_id;
+        let wallet_id = self.wallet_id;
         let network = self.network;
         let res = tokio::task::spawn_blocking(move || {
             let wallet = Wallet::new(
                 external,
                 Some(internal),
                 network,
-                SqlxWalletDb::new(pool, keychain_id),
+                SqlxWalletDb::new(pool, keychain_id).with_wallet_id(wallet_id),
             )
             .expect("Couldn't construct wallet");
             f(wallet)

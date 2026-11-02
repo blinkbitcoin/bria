@@ -5,7 +5,10 @@ use uuid::Uuid;
 
 use std::collections::HashMap;
 
-use super::convert::BdkKeychainKind;
+use super::{
+    commit_watch::{run_chunk, CommitPhase, CommitProgress},
+    convert::BdkKeychainKind,
+};
 use crate::primitives::{bitcoin::ScriptBuf, *};
 
 type ScriptWithPath = (ScriptBuf, (bdk::KeychainKind, u32));
@@ -17,6 +20,7 @@ pub struct ScriptPubkeys {
 
 impl ScriptPubkeys {
     const LIST_WITH_PATHS_BATCH_SIZE: i64 = 10_000;
+    pub(super) const PERSIST_BATCH_SIZE: usize = 5000;
 
     fn script_with_path(
         script: Vec<u8>,
@@ -54,30 +58,38 @@ impl ScriptPubkeys {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         keys: Vec<(BdkKeychainKind, u32, ScriptBuf)>,
+        progress: &CommitProgress,
     ) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 5000;
-        let chunks = keys.chunks(BATCH_SIZE);
+        let chunks = keys.chunks(Self::PERSIST_BATCH_SIZE);
         for chunk in chunks {
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"INSERT INTO bdk_script_pubkeys
         (keychain_id, keychain_kind, path, script, script_hex, script_fmt)"#,
             );
 
+            let mut bytes: u64 = 0;
             query_builder.push_values(chunk, |mut builder, (keychain, path, script)| {
+                let script_hex = format!("{script:02x}");
+                let script_fmt = format!("{script:?}");
+                // uuid + keychain kind + path + script + hex + fmt
+                bytes += (16 + 8 + 4 + script.len() + script_hex.len() + script_fmt.len()) as u64;
                 builder.push_bind(self.keychain_id);
                 builder.push_bind(keychain);
                 builder.push_bind(*path as i32);
                 builder.push_bind(script.as_bytes());
-                builder.push_bind(format!("{script:02x}"));
-                builder.push_bind(format!("{script:?}"));
+                builder.push_bind(script_hex);
+                builder.push_bind(script_fmt);
             });
             query_builder.push("ON CONFLICT DO NOTHING");
 
-            query_builder
-                .build()
-                .execute(tx.as_mut())
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+            run_chunk(
+                progress,
+                CommitPhase::ScriptPubkeys,
+                chunk.len(),
+                bytes,
+                query_builder.build().execute(tx.as_mut()),
+            )
+            .await?;
         }
         Ok(())
     }

@@ -4,9 +4,15 @@ use bdk::{
     KeychainKind, LocalUtxo, TransactionDetails,
 };
 
+use std::{sync::Arc, time::Instant};
+
+use tracing::{field, Instrument};
+
 use super::{
-    convert::BdkKeychainKind, lookups::TxLookupMode, ScriptPubkeys, SqlxWalletDb, Transactions,
-    Utxos, WalletBatchState,
+    commit_watch::{chunks_for, spawn_watchdog, CommitIds, CommitPhase, CommitProgress},
+    convert::BdkKeychainKind,
+    lookups::TxLookupMode,
+    CommitStats, ScriptPubkeys, SqlxWalletDb, Transactions, Utxos, WalletBatchState,
 };
 
 impl BatchOperations for SqlxWalletDb {
@@ -300,6 +306,7 @@ impl Database for SqlxWalletDb {
 
 #[cfg(test)]
 mod tests {
+    use super::super::commit_watch::test_capture::{Capture, CapturedSpan};
     use super::*;
     use bdk::bitcoin::hashes::Hash;
     use sqlx::postgres::PgPoolOptions;
@@ -334,6 +341,234 @@ mod tests {
         let summary = Database::get_tx(&db, &txid, false).expect("get_tx should succeed");
         assert_eq!(summary.map(|s| s.txid), Some(txid));
     }
+
+    struct CommitRun {
+        capture: Capture,
+        rt: tokio::runtime::Runtime,
+        pool: sqlx::PgPool,
+        keychain_id: crate::primitives::KeychainId,
+        result: Result<(), bdk::Error>,
+        stats: CommitStats,
+    }
+
+    impl CommitRun {
+        fn rows(&self, table: &str) -> i64 {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE keychain_id = $1");
+            self.rt
+                .block_on(
+                    sqlx::query_scalar::<_, i64>(&sql)
+                        .bind(uuid::Uuid::from(self.keychain_id))
+                        .fetch_one(&self.pool),
+                )
+                .expect("count should succeed")
+        }
+    }
+
+    fn pg_url() -> String {
+        let pg_host = std::env::var("PG_HOST").unwrap_or("localhost".to_string());
+        format!("postgres://user:password@{pg_host}:5432/pg")
+    }
+
+    // bdk tables have no foreign keys, so a fresh keychain id isolates each run.
+    fn commit_with_capture(stage: impl FnOnce(&mut SqlxWalletDb)) -> CommitRun {
+        let capture = Capture::new();
+        let rt = capture.runtime();
+        let keychain_id = uuid::Uuid::new_v4().into();
+        let (pool, result, stats) =
+            tracing::dispatcher::with_default(&capture.dispatch.clone(), || {
+                let pool = rt
+                    .block_on(sqlx::PgPool::connect(&pg_url()))
+                    .expect("connect should succeed");
+                let mut db = {
+                    let _enter = rt.enter();
+                    SqlxWalletDb::new(pool.clone(), keychain_id)
+                        .with_wallet_id(uuid::Uuid::new_v4().into())
+                };
+                let mut batch = db.begin_batch();
+                stage(&mut batch);
+                let result = db.commit_batch(batch);
+                (pool, result, db.commit_stats())
+            });
+        CommitRun {
+            capture,
+            rt,
+            pool,
+            keychain_id,
+            result,
+            stats,
+        }
+    }
+
+    fn sample_utxo(n: u8) -> LocalUtxo {
+        LocalUtxo {
+            outpoint: OutPoint::new(Txid::from_slice(&[n; 32]).expect("valid txid"), 0),
+            txout: bdk::bitcoin::TxOut {
+                value: 1_000,
+                script_pubkey: ScriptBuf::from(vec![0x51]),
+            },
+            keychain: KeychainKind::External,
+            is_spent: false,
+        }
+    }
+
+    fn stage_rows(db: &mut SqlxWalletDb, n: u8) {
+        for i in 0..n {
+            let script = ScriptBuf::from(vec![0x51, i]);
+            db.set_script_pubkey(&script, KeychainKind::External, u32::from(i))
+                .expect("stage script");
+            db.set_utxo(&sample_utxo(i + 1)).expect("stage utxo");
+            db.set_tx(&tx_details(
+                Txid::from_slice(&[i + 101; 32]).expect("valid txid"),
+            ))
+            .expect("stage tx");
+        }
+    }
+
+    fn field_u64(span: &CapturedSpan, name: &str) -> u64 {
+        span.field(name)
+            .unwrap_or_else(|| panic!("{name} not recorded"))
+            .parse()
+            .expect("numeric field")
+    }
+
+    #[test]
+    fn commit_batch_emits_commit_and_chunk_spans() {
+        let run = commit_with_capture(|db| stage_rows(db, 2));
+        run.result.as_ref().expect("commit should succeed");
+
+        let commits = run.capture.named("bdk.commit_batch");
+        assert_eq!(commits.len(), 1);
+        let commit = &commits[0];
+        assert_eq!(
+            commit.field("keychain_id"),
+            Some(run.keychain_id.to_string().as_str())
+        );
+        assert!(commit.field("wallet_id").is_some());
+        assert!(commit.field("backend_pid").is_some());
+        assert_eq!(commit.field("n_addresses"), Some("2"));
+        assert_eq!(commit.field("n_utxos"), Some("2"));
+        assert_eq!(commit.field("n_txs"), Some("2"));
+        assert_eq!(commit.field("chunks_total"), Some("3"));
+        let bytes_total = field_u64(commit, "bytes_total");
+        assert!(bytes_total > 0);
+        assert!(!commit.has_error_event());
+
+        let chunks = run.capture.named("bdk.persist_chunk");
+        let tables: Vec<_> = chunks.iter().map(|c| c.field("table").unwrap()).collect();
+        assert_eq!(
+            tables,
+            vec!["bdk_script_pubkeys", "bdk_utxos", "bdk_transactions"]
+        );
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.parent, Some("bdk.commit_batch"));
+            assert_eq!(chunk.field("rows"), Some("2"));
+            assert_eq!(
+                chunk.field("chunk_index"),
+                Some((i + 1).to_string().as_str())
+            );
+            assert!(!chunk.has_error_event());
+        }
+        let chunk_bytes: u64 = chunks.iter().map(|c| field_u64(c, "bytes")).sum();
+        assert_eq!(chunk_bytes, bytes_total);
+
+        let commit_spans = run.capture.named("bdk.commit_batch.commit");
+        assert_eq!(commit_spans.len(), 1);
+        assert_eq!(commit_spans[0].parent, Some("bdk.commit_batch"));
+        assert!(run
+            .capture
+            .named("bdk.commit_batch.still_running")
+            .is_empty());
+
+        assert_eq!(
+            run.stats,
+            CommitStats {
+                n_addresses: 2,
+                n_utxos: 2,
+                n_txs: 2,
+                bytes: bytes_total,
+            }
+        );
+        assert_eq!(run.rows("bdk_script_pubkeys"), 2);
+        assert_eq!(run.rows("bdk_utxos"), 2);
+        assert_eq!(run.rows("bdk_transactions"), 2);
+    }
+
+    #[test]
+    fn commit_batch_with_empty_batch_emits_no_chunk_spans() {
+        let run = commit_with_capture(|_| {});
+        run.result.as_ref().expect("commit should succeed");
+
+        let commits = run.capture.named("bdk.commit_batch");
+        assert_eq!(commits.len(), 1);
+        let commit = &commits[0];
+        assert_eq!(commit.field("n_addresses"), Some("0"));
+        assert_eq!(commit.field("n_utxos"), Some("0"));
+        assert_eq!(commit.field("n_txs"), Some("0"));
+        assert_eq!(commit.field("chunks_total"), Some("0"));
+        assert_eq!(commit.field("bytes_total"), Some("0"));
+        assert!(run.capture.named("bdk.persist_chunk").is_empty());
+        assert_eq!(run.capture.named("bdk.commit_batch.commit").len(), 1);
+        assert!(run
+            .capture
+            .named("bdk.commit_batch.still_running")
+            .is_empty());
+        assert_eq!(run.stats, CommitStats::default());
+    }
+
+    #[test]
+    fn commit_batch_error_marks_chunk_span_and_propagates() {
+        let run = commit_with_capture(|db| {
+            stage_rows(db, 1);
+            // The same outpoint twice in one upsert makes the utxos INSERT fail.
+            let mut dup = sample_utxo(1);
+            dup.is_spent = true;
+            db.set_utxo(&dup).expect("stage duplicate utxo");
+        });
+
+        let message = match &run.result {
+            Err(bdk::Error::Generic(message)) => message.clone(),
+            other => panic!("unexpected result: {other:?}"),
+        };
+        assert!(
+            message.contains("cannot affect row a second time"),
+            "{message}"
+        );
+
+        let chunks = run.capture.named("bdk.persist_chunk");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].field("table"), Some("bdk_script_pubkeys"));
+        assert!(!chunks[0].has_error_event());
+        let failed = &chunks[1];
+        assert_eq!(failed.field("table"), Some("bdk_utxos"));
+        assert_eq!(failed.field("rows"), Some("2"));
+        let event = failed
+            .events
+            .iter()
+            .find(|e| e.level == tracing::Level::ERROR)
+            .expect("error event in failed chunk");
+        assert_eq!(event.fields.get("error"), Some(&message));
+
+        let commits = run.capture.named("bdk.commit_batch");
+        assert_eq!(commits.len(), 1);
+        // The failure is logged once, on the chunk span only.
+        assert!(!commits[0].has_error_event());
+        let error_events = failed
+            .events
+            .iter()
+            .filter(|e| e.level == tracing::Level::ERROR)
+            .count();
+        assert_eq!(error_events, 1);
+        assert!(run.capture.named("bdk.commit_batch.commit").is_empty());
+        assert!(run
+            .capture
+            .named("bdk.commit_batch.still_running")
+            .is_empty());
+
+        assert_eq!(run.stats, CommitStats::default());
+        assert_eq!(run.rows("bdk_script_pubkeys"), 0);
+        assert_eq!(run.rows("bdk_utxos"), 0);
+        assert_eq!(run.rows("bdk_transactions"), 0);
+    }
 }
 
 impl BatchDatabase for SqlxWalletDb {
@@ -345,6 +580,7 @@ impl BatchDatabase for SqlxWalletDb {
             cache: self.cache.clone(),
             batch: WalletBatchState::default(),
             miss_resolution: self.miss_resolution,
+            commit_stats: CommitStats::default(),
         }
     }
 
@@ -374,38 +610,99 @@ impl BatchDatabase for SqlxWalletDb {
 
         let utxos_for_db = std::mem::take(&mut batch.batch.utxos);
         let keychain_id = batch.ctx.keychain_id;
+        let wallet_id = batch.ctx.wallet_id;
         let pool = batch.ctx.pool.clone();
 
-        batch.ctx.rt.block_on(async move {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+        let n_addresses = addresses_for_db.len();
+        let n_utxos = utxos_for_db.len();
+        let n_txs = txs_for_db.len();
+        let chunks_total = chunks_for(n_addresses, ScriptPubkeys::PERSIST_BATCH_SIZE)
+            + chunks_for(n_utxos, Utxos::PERSIST_BATCH_SIZE)
+            + chunks_for(n_txs, Transactions::PERSIST_BATCH_SIZE);
+        let progress = Arc::new(CommitProgress::new(chunks_total));
+        let commit_span = tracing::info_span!(
+            "bdk.commit_batch",
+            keychain_id = %keychain_id,
+            wallet_id = field::Empty,
+            n_addresses,
+            n_utxos,
+            n_txs,
+            chunks_total,
+            bytes_total = field::Empty,
+            backend_pid = field::Empty,
+        );
+        if let Some(wallet_id) = wallet_id {
+            commit_span.record("wallet_id", field::display(wallet_id));
+        }
 
-            if !addresses_for_db.is_empty() {
-                ScriptPubkeys::new(keychain_id, pool.clone())
-                    .persist_all_in_tx(&mut tx, addresses_for_db)
-                    .await?;
+        let result = batch.ctx.rt.block_on(
+            {
+                let progress = Arc::clone(&progress);
+                let commit_span = commit_span.clone();
+                async move {
+                    let started = Instant::now();
+                    let mut tx = pool
+                        .begin()
+                        .await
+                        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+                    let backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                        .fetch_one(tx.as_mut())
+                        .await
+                        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+                    commit_span.record("backend_pid", backend_pid);
+                    let _watchdog = spawn_watchdog(
+                        started,
+                        pool.clone(),
+                        Some(backend_pid),
+                        Arc::clone(&progress),
+                        CommitIds {
+                            keychain_id,
+                            wallet_id,
+                        },
+                        commit_span.clone(),
+                    );
+
+                    if !addresses_for_db.is_empty() {
+                        ScriptPubkeys::new(keychain_id, pool.clone())
+                            .persist_all_in_tx(&mut tx, addresses_for_db, &progress)
+                            .await?;
+                    }
+
+                    if !utxos_for_db.is_empty() {
+                        Utxos::new(keychain_id, pool.clone())
+                            .persist_all_in_tx(&mut tx, utxos_for_db, &progress)
+                            .await?;
+                    }
+
+                    if !txs_for_db.is_empty() {
+                        Transactions::new(keychain_id, pool)
+                            .persist_all_in_tx(&mut tx, txs_for_db, &progress)
+                            .await?;
+                    }
+
+                    progress.set_phase(CommitPhase::Commit);
+                    tx.commit()
+                        .instrument(tracing::info_span!("bdk.commit_batch.commit"))
+                        .await
+                        .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+
+                    Ok::<_, bdk::Error>(())
+                }
             }
+            .instrument(commit_span.clone()),
+        );
+        let bytes = progress.bytes_sent();
+        commit_span.record("bytes_total", bytes);
+        drop(commit_span);
+        result?;
 
-            if !utxos_for_db.is_empty() {
-                Utxos::new(keychain_id, pool.clone())
-                    .persist_all_in_tx(&mut tx, utxos_for_db)
-                    .await?;
-            }
-
-            if !txs_for_db.is_empty() {
-                Transactions::new(keychain_id, pool)
-                    .persist_all_in_tx(&mut tx, txs_for_db)
-                    .await?;
-            }
-
-            tx.commit()
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
-
-            Ok::<_, bdk::Error>(())
-        })?;
+        self.commit_stats += CommitStats {
+            n_addresses: n_addresses as u64,
+            n_utxos: n_utxos as u64,
+            n_txs: n_txs as u64,
+            bytes,
+        };
 
         let mut cache_degraded = false;
         if let Err(error) = self.cache.extend_script_pubkeys(addresses_for_cache) {
