@@ -85,12 +85,17 @@ async fn build_psbt() -> anyhow::Result<()> {
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+    let (mut commit_n_txs, mut commit_bytes) = (0, 0);
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain
+        let stats = domain_current_keychain
             .sync(blockchain, test_progress_context())
             .await?;
+        commit_n_txs += stats.n_txs;
+        commit_bytes += stats.bytes;
     }
+    assert!(commit_n_txs >= 1);
+    assert!(commit_bytes > 0);
 
     let fee = FeeRate::from_sat_per_vb(1.0);
     let cfg = PsbtBuilderConfig::builder()
@@ -299,12 +304,17 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
     let builder = builder
         .wallet_payouts(domain_wallet_id, payouts_one)
         .accept_current_keychain();
+    let (mut commit_n_txs, mut commit_bytes) = (0, 0);
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain
+        let stats = domain_current_keychain
             .sync(blockchain, test_progress_context())
             .await?;
+        commit_n_txs += stats.n_txs;
+        commit_bytes += stats.bytes;
     }
+    assert!(commit_n_txs >= 1);
+    assert!(commit_bytes > 0);
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)
         .await?
@@ -426,12 +436,17 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
     let builder = builder
         .wallet_payouts(domain_wallet_id, payouts_one)
         .accept_current_keychain();
+    let (mut commit_n_txs, mut commit_bytes) = (0, 0);
     while !find_tx_id(&pool, domain_current_keychain_id, tx_id).await? {
         let blockchain = helpers::electrum_blockchain().await?;
-        domain_current_keychain
+        let stats = domain_current_keychain
             .sync(blockchain, test_progress_context())
             .await?;
+        commit_n_txs += stats.n_txs;
+        commit_bytes += stats.bytes;
     }
+    assert!(commit_n_txs >= 1);
+    assert!(commit_bytes > 0);
     let builder = domain_current_keychain
         .dispatch_bdk_wallet(builder)
         .await?

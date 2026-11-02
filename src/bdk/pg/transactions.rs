@@ -5,6 +5,7 @@ use tracing::instrument;
 
 use std::collections::HashMap;
 
+use super::commit_watch::{json_len, run_chunk, CommitPhase, CommitProgress};
 use crate::{bdk::error::BdkError, primitives::*};
 
 type SerializedTransactionRow = (String, serde_json::Value, i64, Option<i32>);
@@ -106,6 +107,8 @@ impl Transactions {
             .collect()
     }
 
+    pub(super) const PERSIST_BATCH_SIZE: usize = 2000;
+
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
         Self { keychain_id, pool }
     }
@@ -131,12 +134,19 @@ impl Transactions {
         &self,
         tx: &mut SqlxTransaction<'_, Postgres>,
         txs: Vec<TransactionDetails>,
+        progress: &CommitProgress,
     ) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 2000;
-        let batches = txs.chunks(BATCH_SIZE);
+        let batches = txs.chunks(Self::PERSIST_BATCH_SIZE);
 
         for batch in batches {
             let serialized_batch = Self::serialize_batch(batch)?;
+            let rows = serialized_batch.len();
+            let bytes: u64 = serialized_batch
+                .iter()
+                .map(|(tx_id, details_json, _, _)| {
+                    16 + tx_id.len() as u64 + json_len(details_json) + 8 + 4
+                })
+                .sum();
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"
@@ -168,11 +178,14 @@ impl Transactions {
                     OR bdk_transactions.deleted_at IS NOT NULL",
             );
 
-            query_builder
-                .build()
-                .execute(tx.as_mut())
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+            run_chunk(
+                progress,
+                CommitPhase::Transactions,
+                rows,
+                bytes,
+                query_builder.build().execute(tx.as_mut()),
+            )
+            .await?;
         }
 
         Ok(())

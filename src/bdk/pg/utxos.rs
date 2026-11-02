@@ -3,6 +3,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction as SqlxTransaction};
 use tracing::instrument;
 use uuid::Uuid;
 
+use super::commit_watch::{json_len, run_chunk, CommitPhase, CommitProgress};
 use crate::{bdk::error::BdkError, primitives::*};
 
 type SerializedUtxoRow = (String, i32, serde_json::Value, bool);
@@ -35,6 +36,8 @@ impl Utxos {
             .collect()
     }
 
+    pub(super) const PERSIST_BATCH_SIZE: usize = 2000;
+
     pub fn new(keychain_id: KeychainId, pool: PgPool) -> Self {
         Self { keychain_id, pool }
     }
@@ -43,12 +46,19 @@ impl Utxos {
         &self,
         tx: &mut SqlxTransaction<'_, Postgres>,
         utxos: Vec<LocalUtxo>,
+        progress: &CommitProgress,
     ) -> Result<(), bdk::Error> {
-        const BATCH_SIZE: usize = 2000;
-        let batches = utxos.chunks(BATCH_SIZE);
+        let batches = utxos.chunks(Self::PERSIST_BATCH_SIZE);
 
         for batch in batches {
             let serialized_batch = Self::serialize_batch(batch)?;
+            let rows = serialized_batch.len();
+            let bytes: u64 = serialized_batch
+                .iter()
+                .map(|(tx_id, _, utxo_json, _)| {
+                    16 + tx_id.len() as u64 + 4 + json_len(utxo_json) + 1
+                })
+                .sum();
 
             let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"INSERT INTO bdk_utxos
@@ -77,11 +87,14 @@ impl Utxos {
                     OR bdk_utxos.deleted_at IS NOT NULL",
             );
 
-            query_builder
-                .build()
-                .execute(tx.as_mut())
-                .await
-                .map_err(|e| bdk::Error::Generic(e.to_string()))?;
+            run_chunk(
+                progress,
+                CommitPhase::Utxos,
+                rows,
+                bytes,
+                query_builder.build().execute(tx.as_mut()),
+            )
+            .await?;
         }
 
         Ok(())
