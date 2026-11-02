@@ -1,3 +1,10 @@
+# [bria release v0.1.140](https://github.com/blinkbitcoin/bria/releases/tag/0.1.140)
+
+
+### Features
+
+- Set idle_in_transaction_session_timeout on db connections (#77)
+
 # [bria release v0.1.139](https://github.com/blinkbitcoin/bria/releases/tag/0.1.139)
 
 
