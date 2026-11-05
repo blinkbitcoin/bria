@@ -13,5 +13,14 @@ electrum-client releases without changing the Bitcoin-facing API:
 - the Rustls 0.23 custom-verifier API is used for the existing explicit
   `validate_domain(false)` option.
 
-Remove this path patch when Bria migrates from BDK 0.30 to a release whose
-Electrum dependency uses the maintained Rustls stack directly.
+Blink's current Bria deployment points at Fulcrum on port 50001 without an
+`ssl://` scheme, which `electrum-client` treats as plaintext `tcp://`. The TLS
+transport—and the seven retired Rustls/webpki advisories—was therefore not
+reachable in the usual deployment. This backport keeps the optional `ssl://`
+path maintained for other configurations.
+
+Remove this path patch when the [Bria BDK migration][bria-bdk-migration] moves
+from BDK 0.30 to a release whose Electrum dependency uses the maintained
+Rustls stack directly.
+
+[bria-bdk-migration]: https://github.com/blinkbitcoin/blink-wip/issues/1156

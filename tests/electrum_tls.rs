@@ -3,9 +3,13 @@ use std::{
     net::TcpListener,
     sync::Arc,
     thread,
+    time::Duration,
 };
 
-use electrum_client::{Client, ConfigBuilder, ElectrumApi};
+use electrum_client::{
+    raw_client::{ElectrumSslStream, RawClient},
+    ElectrumApi,
+};
 use rustls::{
     pki_types::{CertificateDer, PrivatePkcs8KeyDer},
     ServerConfig, ServerConnection, StreamOwned,
@@ -48,24 +52,26 @@ fn ssl_client_rejects_an_untrusted_server_certificate() {
         }
     });
 
-    let client = Client::from_config(
-        &format!("ssl://localhost:{}", address.port()),
-        ConfigBuilder::new().retry(0).timeout(Some(2)).build(),
+    let server_address = format!("localhost:{}", address.port());
+    let client = RawClient::<ElectrumSslStream>::new_ssl(
+        server_address.as_str(),
+        true,
+        Some(Duration::from_secs(2)),
     )
     .expect("client construction defers the TLS handshake");
 
+    let error = client
+        .ping()
+        .expect_err("an untrusted Electrum TLS certificate must be rejected");
     assert!(
-        client.ping().is_err(),
-        "an untrusted Electrum TLS certificate must be rejected"
+        format!("{error:?}").contains("InvalidCertificate(UnknownIssuer)"),
+        "the validating client must reject the self-signed issuer, got: {error:?}"
     );
 
-    let control = Client::from_config(
-        &format!("ssl://localhost:{}", address.port()),
-        ConfigBuilder::new()
-            .retry(0)
-            .timeout(Some(2))
-            .validate_domain(false)
-            .build(),
+    let control = RawClient::<ElectrumSslStream>::new_ssl(
+        server_address.as_str(),
+        false,
+        Some(Duration::from_secs(2)),
     )
     .expect("non-validating control client");
     control

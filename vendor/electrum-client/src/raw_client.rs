@@ -293,10 +293,10 @@ mod danger {
     use rustls::DigitallySignedStruct;
 
     #[derive(Debug)]
-    pub struct NoCertificateVerification(CryptoProvider);
+    pub struct NoCertificateVerification(std::sync::Arc<CryptoProvider>);
 
     impl NoCertificateVerification {
-        pub fn new(provider: CryptoProvider) -> Self {
+        pub fn new(provider: std::sync::Arc<CryptoProvider>) -> Self {
             Self(provider)
         }
     }
@@ -386,7 +386,10 @@ impl RawClient<ElectrumSslStream> {
     ) -> Result<Self, Error> {
         use std::convert::TryFrom;
 
-        let builder = ClientConfig::builder();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let builder = ClientConfig::builder_with_provider(std::sync::Arc::clone(&provider))
+            .with_safe_default_protocol_versions()
+            .map_err(Error::CouldNotCreateConnection)?;
 
         let config = if validate_domain {
             socket_addr.domain().ok_or(Error::MissingDomain)?;
@@ -401,9 +404,7 @@ impl RawClient<ElectrumSslStream> {
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(std::sync::Arc::new(
-                    danger::NoCertificateVerification::new(
-                        rustls::crypto::ring::default_provider(),
-                    ),
+                    danger::NoCertificateVerification::new(provider),
                 ))
                 .with_no_client_auth()
         };
