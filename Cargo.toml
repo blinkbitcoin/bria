@@ -78,9 +78,21 @@ tonic_lnd = { version = "0.4.0", package = "fedimint-tonic-lnd", features = [
 ] }
 
 [dev-dependencies]
+rcgen = "0.13.2"
+rustls = { version = "0.23.21", default-features = false, features = [
+    "logging",
+    "ring",
+    "std",
+    "tls12",
+] }
 serial_test = "3.2.0"
 wiremock = "0.6"
 
 [build-dependencies]
 protobuf-src = { version = "1.1.0" }
 tonic-build = { version = "0.12.3", features = ["prost"] }
+
+[patch.crates-io]
+# BDK 0.30 still requires electrum-client 0.18. Keep its Bitcoin 0.30 API while
+# backporting the maintained Rustls 0.23 transport until the BDK migration lands.
+electrum-client = { path = "vendor/electrum-client" }

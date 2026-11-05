@@ -1,2 +1,2 @@
 [files]
-extend-exclude = ["CHANGELOG.md", "*.cert"]
+extend-exclude = ["CHANGELOG.md", "*.cert", "vendor/"]
