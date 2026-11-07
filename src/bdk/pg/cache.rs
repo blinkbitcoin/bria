@@ -167,11 +167,14 @@ impl WalletCache {
         keychain: Option<KeychainKind>,
     ) -> Result<Vec<ScriptBuf>, bdk::Error> {
         let cache = self.lock_script_pubkeys()?;
-        Ok(cache
+        let mut scripts: Vec<_> = cache
             .iter()
             .filter(|(_, (kind, _))| keychain.is_none_or(|k| *kind == k))
-            .map(|(script, _)| script.clone())
-            .collect())
+            .map(|(script, (kind, path))| ((*kind as u8, *path), script.clone()))
+            .collect();
+        // bdk's gap-limit scan treats list position as derivation index
+        scripts.sort_unstable_by_key(|(key, _)| *key);
+        Ok(scripts.into_iter().map(|(_, script)| script).collect())
     }
 
     pub(super) fn script_pubkeys_fully_loaded(&self, keychain: Option<KeychainKind>) -> bool {
