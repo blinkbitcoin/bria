@@ -474,6 +474,44 @@ mod tests {
     }
 
     #[test]
+    fn all_script_pubkeys_returns_cached_scripts_in_path_order() {
+        let cache = WalletCache::new();
+        let script_for = |kind: KeychainKind, path: u32| {
+            let mut bytes = vec![kind as u8];
+            bytes.extend_from_slice(&path.to_be_bytes());
+            ScriptBuf::from(bytes)
+        };
+        let paths: Vec<u32> = (0..500).map(|i| (i * 7919) % 500).collect();
+        let entries = paths
+            .iter()
+            .flat_map(|&path| {
+                [KeychainKind::External, KeychainKind::Internal]
+                    .map(|kind| (script_for(kind, path), (kind, path)))
+            })
+            .collect();
+
+        SqlxWalletDb::cache_loaded_script_pubkeys(&cache, None, entries)
+            .expect("cache should be populated");
+
+        let external = cache
+            .all_script_pubkeys(Some(KeychainKind::External))
+            .expect("all_script_pubkeys should succeed");
+        let expected: Vec<_> = (0..500)
+            .map(|path| script_for(KeychainKind::External, path))
+            .collect();
+        assert_eq!(external, expected);
+
+        let all = cache
+            .all_script_pubkeys(None)
+            .expect("all_script_pubkeys should succeed");
+        let expected_all: Vec<_> = [KeychainKind::External, KeychainKind::Internal]
+            .into_iter()
+            .flat_map(|kind| (0..500).map(move |path| script_for(kind, path)))
+            .collect();
+        assert_eq!(all, expected_all);
+    }
+
+    #[test]
     fn wallet_cache_tracks_missing_txids_and_pending_drain() {
         let cache = WalletCache::new();
         let txid = Txid::all_zeros();
