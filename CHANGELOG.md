@@ -1,3 +1,10 @@
+# [bria release v0.1.141](https://github.com/blinkbitcoin/bria/releases/tag/0.1.141)
+
+
+### Bug Fixes
+
+- Return cached script pubkeys in derivation order (#80)
+
 # [bria release v0.1.140](https://github.com/blinkbitcoin/bria/releases/tag/0.1.140)
 
 
