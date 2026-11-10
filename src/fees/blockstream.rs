@@ -6,15 +6,17 @@ use tracing::instrument;
 use super::error::FeeEstimationError;
 use crate::primitives::TxPriority;
 
+const PROVIDER: &str = "blockstream";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FeeEstimatesResponse {
     #[serde(rename = "1")]
-    next_block: f32,
+    next_block: f64,
     #[serde(rename = "3")]
-    half_hour_fee: f32,
+    half_hour_fee: f64,
     #[serde(rename = "6")]
-    hour_fee: f32,
+    hour_fee: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -61,11 +63,12 @@ impl BlockstreamClient {
             );
             FeeEstimationError::CouldNotDecodeResponseBody(err)
         })?;
-        match priority {
-            TxPriority::HalfHour => Ok(FeeRate::from_sat_per_vb(fee_estimations.half_hour_fee)),
-            TxPriority::OneHour => Ok(FeeRate::from_sat_per_vb(fee_estimations.hour_fee)),
-            TxPriority::NextBlock => Ok(FeeRate::from_sat_per_vb(fee_estimations.next_block)),
-        }
+        let sat_per_vb = match priority {
+            TxPriority::HalfHour => fee_estimations.half_hour_fee,
+            TxPriority::OneHour => fee_estimations.hour_fee,
+            TxPriority::NextBlock => fee_estimations.next_block,
+        };
+        super::bounds::checked_fee_rate(sat_per_vb, PROVIDER, priority)
     }
 }
 

@@ -1,5 +1,6 @@
 #![allow(warnings)]
 mod blockstream;
+mod bounds;
 mod client;
 mod config;
 pub mod error;
@@ -95,6 +96,7 @@ fn build_http_client(
 }
 
 pub use blockstream::*;
+pub use bounds::*;
 pub use client::*;
 pub use config::*;
 pub use mempool_space::*;

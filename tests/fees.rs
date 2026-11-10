@@ -170,12 +170,15 @@ async fn concurrent_requests_for_same_priority_coalesced() {
 }
 
 // ---------------------------------------------------------------------------
-// Characterization tests for blinkbitcoin/blink-wip#1101.
+// Fee-rate bounds (blinkbitcoin/blink-wip#1101).
 //
-// These pin down the *unbounded* behavior of the fee estimators as it exists
-// before the fix: whatever the HTTP endpoint says becomes the fee rate used to
-// build (and drain-spend) batches. Phase 1 of the fix inverts them.
+// Implausible readings are rejected at the provider boundary so that the
+// fallback chain can do its job, and so that nothing unvetted is ever cached
+// or handed to bdk's FeeRate (which panics on a negative, infinite or
+// subnormal value).
 // ---------------------------------------------------------------------------
+
+const SANE_BLOCKSTREAM_BODY: &str = r#"{"1": 12.0, "3": 10.0, "6": 5.0}"#;
 
 fn mempool_fee_response_with_fastest(fastest_fee: u64) -> serde_json::Value {
     serde_json::json!({
@@ -189,15 +192,24 @@ fn json_body(raw: &str) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_raw(raw.to_string(), "application/json")
 }
 
-async fn mempool_server_returning(body: serde_json::Value) -> MockServer {
-    let server = MockServer::start().await;
+async fn mount_mempool(server: &MockServer, fastest_fee: u64) {
     Mock::given(method("GET"))
         .and(path("/api/v1/fees/recommended"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(mempool_fee_response_with_fastest(fastest_fee)),
+        )
         .expect(1)
-        .mount(&server)
+        .mount(server)
         .await;
-    server
+}
+
+async fn mount_blockstream(server: &MockServer, raw: &str) {
+    Mock::given(method("GET"))
+        .and(path("/api/fee-estimates"))
+        .respond_with(json_body(raw))
+        .mount(server)
+        .await;
 }
 
 fn blockstream_client(url: String) -> BlockstreamClient {
@@ -210,77 +222,118 @@ fn blockstream_client(url: String) -> BlockstreamClient {
     })
 }
 
-async fn blockstream_server_returning(raw: &str) -> MockServer {
+fn mempool_space_client(url: String) -> MempoolSpaceClient {
+    MempoolSpaceClient::new(MempoolSpaceConfig {
+        url,
+        timeout: Duration::from_secs(5),
+        number_of_retries: 0,
+        rate_limit_per_second: 100,
+        rate_limit_burst: 100,
+    })
+}
+
+#[tokio::test]
+async fn absurdly_high_fee_rate_falls_back_to_other_provider() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/fee-estimates"))
-        .respond_with(json_body(raw))
-        .mount(&server)
-        .await;
-    server
-}
+    mount_mempool(&server, 100_000).await;
+    mount_blockstream(&server, SANE_BLOCKSTREAM_BODY).await;
 
-#[tokio::test]
-async fn absurdly_high_fee_rate_is_used_verbatim() {
-    let server = mempool_server_returning(mempool_fee_response_with_fastest(100_000)).await;
-    let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
 
     let fee_rate = client.fee_rate(TxPriority::NextBlock).await.unwrap();
 
-    assert_eq!(fee_rate.as_sat_per_vb(), 100_000.0);
+    assert_eq!(fee_rate.as_sat_per_vb(), 12.0);
 }
 
 #[tokio::test]
-async fn zero_fee_rate_is_used_verbatim() {
-    let server = mempool_server_returning(mempool_fee_response_with_fastest(0)).await;
-    let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
+async fn zero_fee_rate_falls_back_to_other_provider() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 0).await;
+    mount_blockstream(&server, SANE_BLOCKSTREAM_BODY).await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
 
     let fee_rate = client.fee_rate(TxPriority::NextBlock).await.unwrap();
 
-    assert_eq!(fee_rate.as_sat_per_vb(), 0.0);
+    assert_eq!(fee_rate.as_sat_per_vb(), 12.0);
 }
 
 #[tokio::test]
-async fn absurdly_high_fee_rate_is_cached() {
-    // `expect(1)` on the mock asserts the second call never reaches the server,
-    // i.e. the unvetted value is served from the cache for the whole cache_ttl.
-    let server = mempool_server_returning(mempool_fee_response_with_fastest(100_000)).await;
-    let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
+async fn implausible_fee_rate_is_not_cached() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 100_000).await;
+    mount_blockstream(&server, SANE_BLOCKSTREAM_BODY).await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
 
     let first = client.fee_rate(TxPriority::NextBlock).await.unwrap();
     let second = client.fee_rate(TxPriority::NextBlock).await.unwrap();
 
-    assert_eq!(first.as_sat_per_vb(), 100_000.0);
-    assert_eq!(second.as_sat_per_vb(), 100_000.0);
+    // Only the value that survived validation is cached, so the rejected
+    // reading cannot come back for the rest of the cache_ttl.
+    assert_eq!(first.as_sat_per_vb(), 12.0);
+    assert_eq!(second.as_sat_per_vb(), 12.0);
 }
 
 #[tokio::test]
-#[should_panic(expected = "is_sign_positive")]
-async fn blockstream_negative_fee_rate_panics() {
-    let server = blockstream_server_returning(r#"{"1": -5.0, "3": 10.0, "6": 5.0}"#).await;
+async fn both_providers_implausible_returns_error() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 100_000).await;
+    mount_blockstream(&server, r#"{"1": -5.0, "3": 10.0, "6": 5.0}"#).await;
 
-    let _ = blockstream_client(server.uri())
-        .fee_rate(TxPriority::NextBlock)
-        .await;
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
+
+    assert!(client.fee_rate(TxPriority::NextBlock).await.is_err());
 }
 
 #[tokio::test]
-#[should_panic(expected = "is_normal")]
-async fn blockstream_f32_overflowing_fee_rate_panics() {
-    // 1e40 does not fit in f32: serde silently saturates it to +inf.
-    let server = blockstream_server_returning(r#"{"1": 1e40, "3": 10.0, "6": 5.0}"#).await;
+async fn blockstream_rejects_negative_fee_rate() {
+    let server = MockServer::start().await;
+    mount_blockstream(&server, r#"{"1": -5.0, "3": 10.0, "6": 5.0}"#).await;
 
-    let _ = blockstream_client(server.uri())
+    assert!(blockstream_client(server.uri())
         .fee_rate(TxPriority::NextBlock)
-        .await;
+        .await
+        .is_err());
 }
 
 #[tokio::test]
-#[should_panic(expected = "is_normal")]
-async fn blockstream_subnormal_fee_rate_panics() {
-    let server = blockstream_server_returning(r#"{"1": 1e-45, "3": 10.0, "6": 5.0}"#).await;
+async fn blockstream_rejects_f32_overflowing_fee_rate() {
+    // 1e40 does not fit in f32: it used to saturate to +inf and panic.
+    let server = MockServer::start().await;
+    mount_blockstream(&server, r#"{"1": 1e40, "3": 10.0, "6": 5.0}"#).await;
 
-    let _ = blockstream_client(server.uri())
+    assert!(blockstream_client(server.uri())
         .fee_rate(TxPriority::NextBlock)
-        .await;
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn blockstream_rejects_subnormal_fee_rate() {
+    let server = MockServer::start().await;
+    mount_blockstream(&server, r#"{"1": 1e-45, "3": 10.0, "6": 5.0}"#).await;
+
+    assert!(blockstream_client(server.uri())
+        .fee_rate(TxPriority::NextBlock)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn provider_boundary_is_the_hard_ceiling() {
+    let at_ceiling = MockServer::start().await;
+    mount_mempool(&at_ceiling, HARD_MAX_SAT_PER_VB as u64).await;
+    let fee_rate = mempool_space_client(at_ceiling.uri())
+        .fee_rate(TxPriority::NextBlock)
+        .await
+        .unwrap();
+    assert_eq!(fee_rate.as_sat_per_vb(), HARD_MAX_SAT_PER_VB as f32);
+
+    let above_ceiling = MockServer::start().await;
+    mount_mempool(&above_ceiling, HARD_MAX_SAT_PER_VB as u64 + 1).await;
+    assert!(mempool_space_client(above_ceiling.uri())
+        .fee_rate(TxPriority::NextBlock)
+        .await
+        .is_err());
 }
