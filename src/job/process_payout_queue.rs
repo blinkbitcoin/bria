@@ -4,7 +4,13 @@ use tracing::instrument;
 
 use super::error::JobError;
 use crate::{
-    batch::*, fees::FeesClient, payout::*, payout_queue::*, primitives::*, utxo::*, wallet::*,
+    batch::*,
+    fees::{BoundedFeeRate, FeesClient},
+    payout::*,
+    payout_queue::*,
+    primitives::*,
+    utxo::*,
+    wallet::*,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,7 +154,7 @@ pub(super) async fn execute<'a>(
                 data.account_id,
                 batch_id,
                 data.payout_queue_id,
-                fee_rate,
+                *fee_rate,
                 included_utxos,
             )
             .await?;
@@ -184,7 +190,7 @@ pub async fn construct_psbt(
     utxos: &Utxos,
     wallets: &Wallets,
     payout_queue: PayoutQueue,
-    fee_rate: bitcoin::FeeRate,
+    fee_rate: BoundedFeeRate,
     for_estimation: bool,
 ) -> Result<FinishedPsbtBuild, JobError> {
     let span = tracing::Span::current();

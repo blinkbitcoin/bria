@@ -1,4 +1,3 @@
-#![allow(warnings)]
 mod blockstream;
 mod bounds;
 mod client;

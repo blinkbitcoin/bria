@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use super::{blockstream::*, bounds::FeeBounds, config::*, error::*, mempool_space::*};
+use super::{blockstream::*, bounds::*, config::*, error::*, mempool_space::*};
 use crate::primitives::TxPriority;
 
 #[derive(Clone, Debug)]
@@ -48,8 +48,8 @@ pub struct FeesClient {
     bounds: FeeBounds,
 }
 
-fn record_fee_rate(fee_rate: FeeRate) {
-    tracing::Span::current().record("fee_rate", tracing::field::debug(fee_rate));
+fn record_fee_rate(fee_rate: BoundedFeeRate) {
+    tracing::Span::current().record("fee_rate", tracing::field::debug(*fee_rate));
 }
 
 impl FeesClient {
@@ -70,7 +70,10 @@ impl FeesClient {
     /// an estimate above `max_sat_per_vb` is refused rather than silently
     /// turned into a transaction that pays it.
     #[instrument(name = "fees.fee_rate", skip(self), fields(fee_rate), err)]
-    pub async fn fee_rate(&self, priority: TxPriority) -> Result<FeeRate, FeeEstimationError> {
+    pub async fn fee_rate(
+        &self,
+        priority: TxPriority,
+    ) -> Result<BoundedFeeRate, FeeEstimationError> {
         let fee_rate = self
             .bounds
             .enforce(self.estimated_fee_rate(priority).await?, priority)?;
@@ -90,7 +93,7 @@ impl FeesClient {
     pub async fn fee_rate_for_accounting(
         &self,
         priority: TxPriority,
-    ) -> Result<FeeRate, FeeEstimationError> {
+    ) -> Result<BoundedFeeRate, FeeEstimationError> {
         let fee_rate = self
             .bounds
             .clamp(self.estimated_fee_rate(priority).await?, priority);

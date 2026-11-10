@@ -49,6 +49,31 @@ pub fn checked_fee_rate(
     Ok(FeeRate::from_sat_per_vb(sat_per_vb))
 }
 
+/// A fee rate that has been through [`FeeBounds`].
+///
+/// The PSBT builder accepts nothing else, so no code path can reach
+/// `bdk::TxBuilder::fee_rate` with a rate that skipped the bounds - including
+/// future call sites that get a `FeeRate` from somewhere new.
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+pub struct BoundedFeeRate(FeeRate);
+
+impl BoundedFeeRate {
+    /// Escape hatch for tests that need to build a PSBT at a chosen rate.
+    /// Production code obtains these from `FeesClient`.
+    #[doc(hidden)]
+    pub fn unchecked(fee_rate: FeeRate) -> Self {
+        Self(fee_rate)
+    }
+}
+
+impl std::ops::Deref for BoundedFeeRate {
+    type Target = FeeRate;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// The configured working range for fee rates, applied to every rate handed to
 /// a consumer - including one served from the cache, so that a config change
 /// takes effect immediately and no cached entry can outlive its bounds.
@@ -97,7 +122,7 @@ impl FeeBounds {
         &self,
         fee_rate: FeeRate,
         priority: TxPriority,
-    ) -> Result<FeeRate, FeeEstimationError> {
+    ) -> Result<BoundedFeeRate, FeeEstimationError> {
         let observed = f64::from(fee_rate.as_sat_per_vb());
         if observed > self.max_sat_per_vb {
             return match self.on_max_exceeded {
@@ -120,7 +145,7 @@ impl FeeBounds {
 
     /// Bounds a rate used for internal accounting (fee encumbrance), which must
     /// never fail: wallet syncing depends on it and no funds move.
-    pub(super) fn clamp(&self, fee_rate: FeeRate, priority: TxPriority) -> FeeRate {
+    pub(super) fn clamp(&self, fee_rate: FeeRate, priority: TxPriority) -> BoundedFeeRate {
         let observed = f64::from(fee_rate.as_sat_per_vb());
         if observed > self.max_sat_per_vb {
             self.alert_above_max(observed, priority, "clamp");
@@ -129,7 +154,7 @@ impl FeeBounds {
         self.floored(fee_rate, observed, priority)
     }
 
-    fn floored(&self, fee_rate: FeeRate, observed: f64, priority: TxPriority) -> FeeRate {
+    fn floored(&self, fee_rate: FeeRate, observed: f64, priority: TxPriority) -> BoundedFeeRate {
         if observed < self.min_sat_per_vb {
             tracing::warn!(
                 target: ALERT_TARGET,
@@ -139,13 +164,13 @@ impl FeeBounds {
                 action = "floor",
                 "fee estimate below configured minimum"
             );
-            return FeeRate::from_sat_per_vb(self.min_sat_per_vb as f32);
+            return BoundedFeeRate(FeeRate::from_sat_per_vb(self.min_sat_per_vb as f32));
         }
-        fee_rate
+        BoundedFeeRate(fee_rate)
     }
 
-    fn ceiling(&self) -> FeeRate {
-        FeeRate::from_sat_per_vb(self.max_sat_per_vb as f32)
+    fn ceiling(&self) -> BoundedFeeRate {
+        BoundedFeeRate(FeeRate::from_sat_per_vb(self.max_sat_per_vb as f32))
     }
 
     fn alert_above_max(&self, observed: f64, priority: TxPriority, action: &'static str) {
@@ -225,7 +250,7 @@ mod tests {
         let bounds = bounds(1.0, 1_000.0, OnMaxExceeded::Reject);
 
         assert_eq!(
-            bounds.enforce(rate(42.0), TxPriority::NextBlock).unwrap(),
+            *bounds.enforce(rate(42.0), TxPriority::NextBlock).unwrap(),
             rate(42.0)
         );
     }
@@ -249,7 +274,7 @@ mod tests {
         let bounds = bounds(1.0, 1_000.0, OnMaxExceeded::Clamp);
 
         assert_eq!(
-            bounds
+            *bounds
                 .enforce(rate(5_000.0), TxPriority::NextBlock)
                 .unwrap(),
             rate(1_000.0)
@@ -261,7 +286,7 @@ mod tests {
         let bounds = bounds(5.0, 1_000.0, OnMaxExceeded::Reject);
 
         assert_eq!(
-            bounds.enforce(rate(2.0), TxPriority::NextBlock).unwrap(),
+            *bounds.enforce(rate(2.0), TxPriority::NextBlock).unwrap(),
             rate(5.0)
         );
     }
@@ -271,24 +296,24 @@ mod tests {
         let bounds = bounds(5.0, 1_000.0, OnMaxExceeded::Reject);
 
         assert_eq!(
-            bounds.clamp(rate(9_999.0), TxPriority::NextBlock),
+            *bounds.clamp(rate(9_999.0), TxPriority::NextBlock),
             rate(1_000.0)
         );
-        assert_eq!(bounds.clamp(rate(1.0), TxPriority::NextBlock), rate(5.0));
-        assert_eq!(bounds.clamp(rate(42.0), TxPriority::NextBlock), rate(42.0));
+        assert_eq!(*bounds.clamp(rate(1.0), TxPriority::NextBlock), rate(5.0));
+        assert_eq!(*bounds.clamp(rate(42.0), TxPriority::NextBlock), rate(42.0));
     }
 
     #[test]
     fn nonsensical_config_values_fall_back_to_defaults() {
         let inverted = bounds(900.0, 10.0, OnMaxExceeded::Reject);
         assert_eq!(
-            inverted.clamp(rate(500.0), TxPriority::NextBlock),
+            *inverted.clamp(rate(500.0), TxPriority::NextBlock),
             rate(500.0)
         );
 
         let out_of_range = bounds(0.0, HARD_MAX_SAT_PER_VB * 10.0, OnMaxExceeded::Reject);
         assert_eq!(
-            out_of_range.clamp(rate(2_000.0), TxPriority::NextBlock),
+            *out_of_range.clamp(rate(2_000.0), TxPriority::NextBlock),
             rate(1_000.0)
         );
     }

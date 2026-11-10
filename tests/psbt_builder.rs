@@ -6,7 +6,7 @@ use serial_test::serial;
 use bdk::{bitcoin::Network, blockchain::Blockchain, wallet::AddressIndex, FeeRate, SignOptions};
 use uuid::Uuid;
 
-use bria::{primitives::*, utxo::*, wallet::*, xpub::*};
+use bria::{fees::BoundedFeeRate, primitives::*, utxo::*, wallet::*, xpub::*};
 
 fn test_progress_context() -> SyncProgressContext {
     SyncProgressContext::new()
@@ -95,7 +95,7 @@ async fn build_psbt() -> anyhow::Result<()> {
     let fee = FeeRate::from_sat_per_vb(1.0);
     let cfg = PsbtBuilderConfig::builder()
         .consolidate_deprecated_keychains(true)
-        .fee_rate(fee)
+        .fee_rate(BoundedFeeRate::unchecked(fee))
         .build()
         .unwrap();
     let builder = PsbtBuilder::new(cfg);
@@ -282,7 +282,7 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
     let fee = FeeRate::from_sat_per_vb(sats_per_vbyte as f32);
     let cfg = PsbtBuilderConfig::builder()
         .consolidate_deprecated_keychains(true)
-        .fee_rate(fee)
+        .fee_rate(BoundedFeeRate::unchecked(fee))
         .cpfp_utxos(
             vec![(KeychainId::from(domain_current_keychain_id), cpfp_utxos)]
                 .into_iter()
@@ -413,7 +413,7 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
     let min_change = Satoshis::from(100_000_000);
     let cfg = PsbtBuilderConfig::builder()
         .consolidate_deprecated_keychains(true)
-        .fee_rate(fee)
+        .fee_rate(BoundedFeeRate::unchecked(fee))
         .force_min_change_output(Some(min_change))
         .build()
         .unwrap();

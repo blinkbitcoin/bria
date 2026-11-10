@@ -1,7 +1,7 @@
 use bdk::{
     database::BatchDatabase,
     wallet::{tx_builder::TxOrdering, AddressIndex, AddressInfo},
-    FeeRate, Wallet,
+    Wallet,
 };
 use derive_builder::Builder;
 use std::{
@@ -13,6 +13,7 @@ use tracing::instrument;
 use super::{keychain::*, Wallet as WalletEntity};
 use crate::{
     bdk::error::BdkError,
+    fees::BoundedFeeRate,
     primitives::{bitcoin::*, *},
     utxo::CpfpUtxo,
 };
@@ -67,7 +68,7 @@ impl FinishedPsbtBuild {
 #[builder(pattern = "owned")]
 pub struct PsbtBuilderConfig {
     consolidate_deprecated_keychains: bool,
-    fee_rate: FeeRate,
+    fee_rate: BoundedFeeRate,
     #[builder(default)]
     reserved_utxos: HashMap<KeychainId, Vec<OutPoint>>,
     #[builder(default)]
@@ -302,7 +303,7 @@ impl BdkWalletVisitor for PsbtBuilder<AcceptingDeprecatedKeychainState> {
             }
         }
         builder
-            .fee_rate(self.cfg.fee_rate)
+            .fee_rate(*self.cfg.fee_rate)
             .sighash(DEFAULT_SIGHASH_TYPE.into())
             .drain_wallet()
             .drain_to(drain_address.script_pubkey());
@@ -560,7 +561,7 @@ impl PsbtBuilder<AcceptingCurrentKeychainState> {
         change_address: &AddressInfo,
     ) -> Result<(u64, Vec<OutPoint>, bool), BdkError> {
         let mut builder = wallet.build_tx();
-        builder.fee_rate(self.cfg.fee_rate);
+        builder.fee_rate(*self.cfg.fee_rate);
         builder.drain_to(change_address.script_pubkey());
         if let Some(sats_with_jitter) = self.cfg.force_min_change_output_with_jitter() {
             builder.add_recipient(change_address.script_pubkey(), u64::from(sats_with_jitter));
