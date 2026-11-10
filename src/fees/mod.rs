@@ -213,6 +213,10 @@ pub fn output_fee(fee_rate: &bitcoin::FeeRate, script_pubkey: bitcoin::ScriptBuf
 mod tests {
     use super::*;
 
+    // max_satisfaction_weight is deprecated in miniscript, but it is what the
+    // wallet code uses to size inputs, so the fee assertion below has to use
+    // the same measure.
+    #[allow(deprecated)]
     #[test]
     fn test_fee_calculation() {
         // Reference tx https://blockstream.info/tx/c6260b24a8234f7cb6bd0698634d9056c1a3927a89ab5f98c0dcba199198f187

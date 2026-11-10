@@ -40,6 +40,7 @@ fn test_fees_config(mempool_url: String, blockstream_url: String) -> FeesConfig 
         min_sat_per_vb: 1.0,
         max_sat_per_vb: 1_000.0,
         on_max_exceeded: OnMaxExceeded::Reject,
+        max_batch_fee_tolerance: 3.0,
     }
 }
 

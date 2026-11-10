@@ -6,7 +6,7 @@ use crate::{
     address::error::AddressError,
     batch::error::BatchError,
     bdk::error::BdkError,
-    fees::error::FeeEstimationError,
+    fees::error::{BatchFeeError, FeeEstimationError},
     ledger::error::LedgerError,
     outbox::error::OutboxError,
     payout::error::PayoutError,
@@ -42,6 +42,8 @@ pub enum JobError {
     UtxoError(#[from] UtxoError),
     #[error("{0}")]
     FeeEstimationError(#[from] FeeEstimationError),
+    #[error("{0}")]
+    BatchFeeError(#[from] BatchFeeError),
     #[error("{0}")]
     BatchError(#[from] BatchError),
     #[error("{0}")]

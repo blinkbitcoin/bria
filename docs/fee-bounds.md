@@ -13,6 +13,8 @@ app:
     min_sat_per_vb: 1.0        # default: readings below this are raised to it
     max_sat_per_vb: 1000.0     # default: readings above this are refused
     on_max_exceeded: reject    # reject (default) | clamp
+    max_batch_fee_tolerance: 3.0  # default: how far a batch's fee may exceed
+                                  # what its rate and size imply
 ```
 
 The daemon refuses to start if `min_sat_per_vb` or `max_sat_per_vb` is not a
@@ -51,6 +53,26 @@ a genuine spike can block a queue for longer than deferring the batch would.
 Payouts are never dropped: they stay unbatched and are picked up on the next
 tick.
 
+## The batch guard
+
+Bounding the rate says nothing about the arithmetic that turns a rate into
+satoshis, and that arithmetic is intricate: per-wallet trial builds, an
+absolute fee, header vbytes counted once, CPFP bump allocations. So the last
+thing that happens before a batch is created is a consistency check: the
+batch's own fee - its total fee less any CPFP bump fees, which are paid on
+purpose - must not exceed `max_batch_fee_tolerance` times the fee implied by
+the rate it was built at and the size it will be once signed.
+
+The default tolerance of 3.0 is deliberately generous: this catches a fee that
+is wrong by an order of magnitude, it does not second-guess the builder. Fees
+at or below 25_000 sats are not checked at all, because bdk folds a change
+output that would be dust into the fee, which moves a small absolute fee by a
+large factor.
+
+A batch that trips the guard is not created; the job errors and the payouts are
+picked up on the next tick, exactly as for a refused rate. Tripping it means
+there is a bug in the fee arithmetic - it is worth paging someone.
+
 ## Alerting
 
 Both checks emit structured tracing events. The fields are stable; alert on
@@ -61,6 +83,7 @@ them.
 | `rejected implausible fee estimate` | `bria::fees::bounds` | WARN | `provider`, `priority`, `value`, `hard_max_sat_per_vb` |
 | `fee estimate above configured maximum` | `bria::fees::bounds` | ERROR | `priority`, `observed_sat_per_vb`, `max_sat_per_vb`, `action` (`reject` or `clamp`) |
 | `fee estimate below configured minimum` | `bria::fees::bounds` | WARN | `priority`, `observed_sat_per_vb`, `min_sat_per_vb`, `action` (`floor`) |
+| `batch fee is inconsistent with the fee rate it was built at` | `bria::fees::bounds` | ERROR | `observed_sats`, `expected_sats`, `allowed_sats`, `vbytes`, `sat_per_vb`, `tolerance`, `action` (`reject`) |
 | `invalid fee bound config value; using the default` | `bria::fees::bounds` | WARN | `field`, `configured`, `default` |
 
 A refused reading also surfaces on the `job.process_payout_queue` span as a

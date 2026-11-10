@@ -45,6 +45,9 @@ pub struct FinishedPsbtBuild {
     pub fee_satoshis: Satoshis,
     pub tx_id: Option<bitcoin::Txid>,
     pub psbt: Option<psbt::PartiallySignedTransaction>,
+    /// Size the fee was computed over, including the satisfaction weight the
+    /// inputs will take once signed. `None` when no psbt was built.
+    pub estimated_vbytes: Option<u64>,
 }
 
 impl FinishedPsbtBuild {
@@ -183,6 +186,24 @@ impl<T> PsbtBuilder<T> {
             }
         }
 
+        ret.estimated_vbytes = ret.psbt.as_ref().map(|psbt| {
+            let satisfaction_weight: usize = psbt
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|input| {
+                    self.input_weights
+                        .get(&input.previous_output)
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .sum();
+            // 2 for the segwit marker and flag, as in fees::estimate_proportional_fee
+            (psbt.unsigned_tx.weight()
+                + bdk::bitcoin::Weight::from_wu((satisfaction_weight + 2) as u64))
+            .to_vbytes_ceil()
+        });
+
         // Identify signing keychains
         for (wallet_id, keychain_utxos) in ret.included_utxos.iter() {
             let sum = ret
@@ -242,6 +263,7 @@ impl PsbtBuilder<InitialPsbtBuilderState> {
                 fee_satoshis: Satoshis::from(0),
                 tx_id: None,
                 psbt: None,
+                estimated_vbytes: None,
             },
             _phantom: PhantomData,
         }

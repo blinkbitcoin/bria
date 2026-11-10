@@ -101,6 +101,20 @@ impl FeesClient {
         Ok(fee_rate)
     }
 
+    /// Checks a finished batch's absolute fee against the rate it was built
+    /// at. See [`FeeBounds::check_batch_fee`].
+    #[instrument(name = "fees.check_batch_fee", skip(self), err)]
+    pub fn check_batch_fee(
+        &self,
+        fee_sats: u64,
+        cpfp_fee_sats: u64,
+        vbytes: u64,
+        fee_rate: BoundedFeeRate,
+    ) -> Result<(), BatchFeeError> {
+        self.bounds
+            .check_batch_fee(fee_sats, cpfp_fee_sats, vbytes, fee_rate)
+    }
+
     /// The raw estimate from the cache or the providers, before any bounds.
     async fn estimated_fee_rate(
         &self,

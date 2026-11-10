@@ -31,6 +31,11 @@ pub struct FeesConfig {
     pub max_sat_per_vb: f64,
     #[serde(default)]
     pub on_max_exceeded: OnMaxExceeded,
+    /// How far a finished batch's absolute fee may exceed what its fee rate and
+    /// size imply before the batch is refused. Catches a mistake in the fee
+    /// arithmetic itself, which bounding the rate cannot.
+    #[serde(default = "default_max_batch_fee_tolerance")]
+    pub max_batch_fee_tolerance: f64,
 }
 
 /// What to do when an estimator reports more than `max_sat_per_vb` on a path
@@ -69,6 +74,11 @@ impl FeesConfig {
                 hard_max: HARD_MAX_SAT_PER_VB,
             });
         }
+        if !self.max_batch_fee_tolerance.is_finite() || self.max_batch_fee_tolerance < 1.0 {
+            return Err(FeeBoundsConfigError::InvalidBatchFeeTolerance(
+                self.max_batch_fee_tolerance,
+            ));
+        }
         Ok(())
     }
 }
@@ -84,6 +94,7 @@ impl Default for FeesConfig {
             min_sat_per_vb: default_min_sat_per_vb(),
             max_sat_per_vb: default_max_sat_per_vb(),
             on_max_exceeded: OnMaxExceeded::default(),
+            max_batch_fee_tolerance: default_max_batch_fee_tolerance(),
         }
     }
 }
@@ -127,4 +138,10 @@ pub(super) fn default_min_sat_per_vb() -> f64 {
 /// rather hold payouts than pay a spike should lower this.
 pub(super) fn default_max_sat_per_vb() -> f64 {
     1_000.0
+}
+
+/// Generous on purpose: the batch guard is there to catch a fee that is wrong
+/// by an order of magnitude, not to second-guess the builder's arithmetic.
+pub(super) fn default_max_batch_fee_tolerance() -> f64 {
+    3.0
 }

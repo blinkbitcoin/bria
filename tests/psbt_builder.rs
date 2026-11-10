@@ -314,6 +314,7 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
         included_payouts,
         wallet_totals,
         fee_satoshis,
+        estimated_vbytes,
         ..
     } = builder.finish();
     assert_eq!(
@@ -378,6 +379,19 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
         (u64::from(fee_satoshis - domain_wallet_total.cpfp_fee_satoshis) as f64) / size as f64;
     assert!(sats_per_vbyte_without_cpfp_fees >= sats_per_vbyte);
     assert!(sats_per_vbyte_without_cpfp_fees < sats_per_vbyte * 1.02);
+
+    // The batch fee guard compares a batch's fee against what this estimate
+    // implies, so it has to be an upper bound that stays close to the signed
+    // size.
+    let estimated_vbytes = estimated_vbytes.expect("estimated_vbytes");
+    assert!(
+        estimated_vbytes >= size as u64,
+        "estimated {estimated_vbytes} vbytes is below the signed size of {size}"
+    );
+    assert!(
+        (estimated_vbytes as f64) < size as f64 * 1.05,
+        "estimated {estimated_vbytes} vbytes is far above the signed size of {size}"
+    );
 
     helpers::electrum_blockchain().await?.broadcast(&tx)?;
     Ok(())

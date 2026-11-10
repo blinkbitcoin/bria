@@ -81,6 +81,7 @@ pub(super) async fn execute<'a>(
         wallet_totals,
         tx_id,
         fee_satoshis,
+        estimated_vbytes,
         ..
     } = construct_psbt(
         &pool,
@@ -100,6 +101,9 @@ pub(super) async fn execute<'a>(
         span.record("psbt", tracing::field::display(&psbt));
 
         let wallet_ids = wallet_totals.keys().copied().collect();
+        let cpfp_fee_sats = wallet_totals
+            .values()
+            .fold(Satoshis::ZERO, |acc, v| acc + v.cpfp_fee_satoshis);
         span.record("batch_id", tracing::field::display(data.batch_id));
         span.record("total_fee_sats", tracing::field::display(fee_satoshis));
         span.record(
@@ -110,14 +114,18 @@ pub(super) async fn execute<'a>(
                     .fold(Satoshis::ZERO, |acc, v| acc + v.change_satoshis),
             ),
         );
-        span.record(
-            "cpfp_fee_sats",
-            tracing::field::display(
-                wallet_totals
-                    .values()
-                    .fold(Satoshis::ZERO, |acc, v| acc + v.cpfp_fee_satoshis),
-            ),
-        );
+        span.record("cpfp_fee_sats", tracing::field::display(cpfp_fee_sats));
+
+        // Last stop before the batch exists: the fee has to match the rate it
+        // was built at, whatever the builder arithmetic did.
+        if let Some(vbytes) = estimated_vbytes {
+            fees_client.check_batch_fee(
+                u64::from(fee_satoshis),
+                u64::from(cpfp_fee_sats),
+                vbytes,
+                fee_rate,
+            )?;
+        }
         let batch = NewBatch::builder()
             .account_id(data.account_id)
             .id(data.batch_id)

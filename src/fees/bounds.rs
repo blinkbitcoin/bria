@@ -1,12 +1,20 @@
 use bdk::FeeRate;
 
-use super::config::{default_max_sat_per_vb, default_min_sat_per_vb, FeesConfig, OnMaxExceeded};
-use super::error::FeeEstimationError;
+use super::config::{
+    default_max_batch_fee_tolerance, default_max_sat_per_vb, default_min_sat_per_vb, FeesConfig,
+    OnMaxExceeded,
+};
+use super::error::{BatchFeeError, FeeEstimationError};
 use crate::primitives::TxPriority;
 
 /// Tracing target for the bounds alerts, so that operators have a stable thing
 /// to alert on. `action` says what was done: "floor", "clamp" or "reject".
 const ALERT_TARGET: &str = "bria::fees::bounds";
+
+/// A batch fee at or below this is too small for the consistency check to say
+/// anything useful: bdk folds a change output that would be dust into the fee,
+/// which moves a small absolute fee by a large factor.
+const BATCH_FEE_GUARD_MIN_SATS: u64 = 25_000;
 
 /// Ceiling for any fee rate accepted from an external estimator, in sat/vB.
 ///
@@ -82,6 +90,7 @@ pub(super) struct FeeBounds {
     min_sat_per_vb: f64,
     max_sat_per_vb: f64,
     on_max_exceeded: OnMaxExceeded,
+    max_batch_fee_tolerance: f64,
 }
 
 impl FeeBounds {
@@ -109,10 +118,25 @@ impl FeeBounds {
             (min, max)
         };
 
+        let max_batch_fee_tolerance = if !config.max_batch_fee_tolerance.is_finite()
+            || config.max_batch_fee_tolerance < 1.0
+        {
+            tracing::warn!(
+                field = "max_batch_fee_tolerance",
+                configured = config.max_batch_fee_tolerance,
+                default = default_max_batch_fee_tolerance(),
+                "invalid fee bound config value; using the default"
+            );
+            default_max_batch_fee_tolerance()
+        } else {
+            config.max_batch_fee_tolerance
+        };
+
         Self {
             min_sat_per_vb: min,
             max_sat_per_vb: max,
             on_max_exceeded: config.on_max_exceeded,
+            max_batch_fee_tolerance,
         }
     }
 
@@ -152,6 +176,50 @@ impl FeeBounds {
             return self.ceiling();
         }
         self.floored(fee_rate, observed, priority)
+    }
+
+    /// Last check before a batch is created: the absolute fee has to be
+    /// consistent with the rate it was built at and the size it will be. The
+    /// bounds above constrain the rate; this constrains the arithmetic that
+    /// turned the rate into satoshis, which is where the money actually leaves.
+    pub(super) fn check_batch_fee(
+        &self,
+        fee_sats: u64,
+        cpfp_fee_sats: u64,
+        vbytes: u64,
+        fee_rate: BoundedFeeRate,
+    ) -> Result<(), BatchFeeError> {
+        // CPFP bump fees are paid on purpose and are not implied by this
+        // transaction's own size.
+        let own_fee_sats = fee_sats.saturating_sub(cpfp_fee_sats);
+        if own_fee_sats <= BATCH_FEE_GUARD_MIN_SATS || vbytes == 0 {
+            return Ok(());
+        }
+
+        let expected_sats = fee_rate.fee_vb(vbytes as usize);
+        let allowed_sats = (expected_sats as f64 * self.max_batch_fee_tolerance).ceil() as u64;
+        if own_fee_sats > allowed_sats {
+            let sat_per_vb = f64::from(fee_rate.as_sat_per_vb());
+            tracing::error!(
+                target: ALERT_TARGET,
+                observed_sats = own_fee_sats,
+                expected_sats,
+                allowed_sats,
+                vbytes,
+                sat_per_vb,
+                tolerance = self.max_batch_fee_tolerance,
+                action = "reject",
+                "batch fee is inconsistent with the fee rate it was built at"
+            );
+            return Err(BatchFeeError::InconsistentWithFeeRate {
+                observed_sats: own_fee_sats,
+                expected_sats,
+                vbytes,
+                sat_per_vb,
+                tolerance: self.max_batch_fee_tolerance,
+            });
+        }
+        Ok(())
     }
 
     fn floored(&self, fee_rate: FeeRate, observed: f64, priority: TxPriority) -> BoundedFeeRate {
@@ -319,9 +387,68 @@ mod tests {
     }
 
     #[test]
+    fn batch_fee_consistent_with_the_rate_is_accepted() {
+        let bounds = bounds(1.0, 1_000.0, OnMaxExceeded::Reject);
+        let fee_rate = BoundedFeeRate::unchecked(rate(20.0));
+        // 20 sat/vB over 5_000 vbytes
+        assert!(bounds.check_batch_fee(100_000, 0, 5_000, fee_rate).is_ok());
+    }
+
+    #[test]
+    fn batch_fee_far_above_the_rate_is_refused() {
+        let bounds = bounds(1.0, 1_000.0, OnMaxExceeded::Reject);
+        let fee_rate = BoundedFeeRate::unchecked(rate(20.0));
+
+        let err = bounds
+            .check_batch_fee(10_000_000, 0, 5_000, fee_rate)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BatchFeeError::InconsistentWithFeeRate { expected_sats, .. } if expected_sats == 100_000
+        ));
+    }
+
+    #[test]
+    fn batch_fee_within_the_tolerance_is_accepted() {
+        let bounds = bounds(1.0, 1_000.0, OnMaxExceeded::Reject);
+        let fee_rate = BoundedFeeRate::unchecked(rate(20.0));
+
+        // 2x the implied fee is inside the default 3x tolerance
+        assert!(bounds.check_batch_fee(200_000, 0, 5_000, fee_rate).is_ok());
+        assert!(bounds.check_batch_fee(400_000, 0, 5_000, fee_rate).is_err());
+    }
+
+    #[test]
+    fn small_batch_fees_are_left_alone() {
+        let bounds = bounds(1.0, 1_000.0, OnMaxExceeded::Reject);
+        let fee_rate = BoundedFeeRate::unchecked(rate(1.0));
+
+        // dust folded into the fee can move a small fee by a large factor
+        assert!(bounds.check_batch_fee(25_000, 0, 250, fee_rate).is_ok());
+    }
+
+    #[test]
+    fn cpfp_bump_fees_do_not_count_against_the_batch() {
+        let bounds = bounds(1.0, 1_000.0, OnMaxExceeded::Reject);
+        let fee_rate = BoundedFeeRate::unchecked(rate(20.0));
+
+        // the batch's own fee is 100_000; the rest is a deliberate bump
+        assert!(bounds
+            .check_batch_fee(10_000_000, 9_900_000, 5_000, fee_rate)
+            .is_ok());
+    }
+
+    #[test]
     fn config_validation_catches_unusable_bounds() {
         let valid = FeesConfig::default();
         assert!(valid.validate().is_ok());
+
+        let bad_tolerance = FeesConfig {
+            max_batch_fee_tolerance: 0.5,
+            ..Default::default()
+        };
+        assert!(bad_tolerance.validate().is_err());
 
         for (min, max) in [
             (0.0, 1_000.0),
