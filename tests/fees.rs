@@ -37,6 +37,9 @@ fn test_fees_config(mempool_url: String, blockstream_url: String) -> FeesConfig 
         cache_ttl: Duration::from_secs(30),
         stale_ttl: Duration::from_secs(120),
         enable_stale_on_error: true,
+        min_sat_per_vb: 1.0,
+        max_sat_per_vb: 1_000.0,
+        on_max_exceeded: OnMaxExceeded::Reject,
     }
 }
 
@@ -336,4 +339,76 @@ async fn provider_boundary_is_the_hard_ceiling() {
         .fee_rate(TxPriority::NextBlock)
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn fee_rate_above_configured_max_is_rejected() {
+    let server = MockServer::start().await;
+    // plausible enough to pass the provider boundary, above the configured max
+    mount_mempool(&server, 2_000).await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
+
+    assert!(client.fee_rate(TxPriority::NextBlock).await.is_err());
+}
+
+#[tokio::test]
+async fn fee_rate_above_configured_max_is_clamped_when_configured() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 2_000).await;
+
+    let mut config = test_fees_config(server.uri(), "http://unused".to_string());
+    config.on_max_exceeded = OnMaxExceeded::Clamp;
+    let client = FeesClient::new(config);
+
+    let fee_rate = client.fee_rate(TxPriority::NextBlock).await.unwrap();
+
+    assert_eq!(fee_rate.as_sat_per_vb(), 1_000.0);
+}
+
+#[tokio::test]
+async fn accounting_fee_rate_is_clamped_not_rejected() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 2_000).await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
+
+    let fee_rate = client
+        .fee_rate_for_accounting(TxPriority::NextBlock)
+        .await
+        .unwrap();
+
+    assert_eq!(fee_rate.as_sat_per_vb(), 1_000.0);
+}
+
+#[tokio::test]
+async fn fee_rate_below_configured_min_is_raised() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 2).await;
+
+    let mut config = test_fees_config(server.uri(), "http://unused".to_string());
+    config.min_sat_per_vb = 5.0;
+    let client = FeesClient::new(config);
+
+    let fee_rate = client.fee_rate(TxPriority::NextBlock).await.unwrap();
+
+    assert_eq!(fee_rate.as_sat_per_vb(), 5.0);
+}
+
+#[tokio::test]
+async fn cached_estimate_is_still_bounded() {
+    let server = MockServer::start().await;
+    // `expect(1)`: the second call is served from the cache, and the bounds are
+    // applied to it all the same.
+    mount_mempool(&server, 2_000).await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
+
+    let clamped = client
+        .fee_rate_for_accounting(TxPriority::NextBlock)
+        .await
+        .unwrap();
+    assert_eq!(clamped.as_sat_per_vb(), 1_000.0);
+
+    assert!(client.fee_rate(TxPriority::NextBlock).await.is_err());
 }

@@ -111,7 +111,9 @@ pub async fn fees_to_encumber(
     fees_client: &FeesClient,
     satisfaction_weight: usize,
 ) -> Result<Satoshis, FeeEstimationError> {
-    let fee_rate = fees_client.fee_rate(TxPriority::NextBlock).await?;
+    let fee_rate = fees_client
+        .fee_rate_for_accounting(TxPriority::NextBlock)
+        .await?;
     Ok(Satoshis::from(fee_rate.fee_wu(Weight::from_wu(
         (TXIN_BASE_WEIGHT + satisfaction_weight) as u64,
     ))))

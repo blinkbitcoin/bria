@@ -25,6 +25,7 @@ pub struct ProcessPayoutQueueData {
         n_reserved_utxos,
         n_cpfp_utxos,
         tx_id,
+        fee_rate_sat_per_vb,
         total_fee_sats,
         cpfp_fee_sats,
         total_change_sats,
@@ -66,6 +67,7 @@ pub(super) async fn execute<'a>(
     let fee_rate = fees_client
         .fee_rate(payout_queue.config.tx_priority)
         .await?;
+    tracing::Span::current().record("fee_rate_sat_per_vb", f64::from(fee_rate.as_sat_per_vb()));
     let FinishedPsbtBuild {
         psbt,
         included_payouts,
