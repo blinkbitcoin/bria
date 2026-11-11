@@ -458,6 +458,131 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[serial]
+// max_satisfaction_weight is deprecated in miniscript, but it is the measure the
+// builder sizes inputs with, so the expectation below has to use the same one.
+#[allow(deprecated)]
+async fn estimated_vbytes_keeps_each_inputs_own_weight() -> anyhow::Result<()> {
+    // A batch that consolidates a 2-of-3 multisig deprecated keychain into a
+    // single-sig current keychain. Every input ends up in one psbt, and the
+    // current keychain is visited last, so a size estimate that applied the
+    // last keychain's weight to all of them would understate the multisig
+    // inputs. FeesClient::check_batch_fee compares a batch's fee against
+    // `fee_rate * estimated_vbytes`, so understating the size reads a
+    // legitimate fee as inconsistent and refuses the batch.
+    let deprecated_keychain = helpers::random_multisig_bdk_wallet(2, 3)?;
+    let current_keychain = helpers::random_bdk_wallet()?;
+
+    let deprecated_weight = deprecated_keychain
+        .get_descriptor_for_keychain(bdk::KeychainKind::External)
+        .max_satisfaction_weight()
+        .expect("Unsupported descriptor");
+    let current_weight = current_keychain
+        .get_descriptor_for_keychain(bdk::KeychainKind::External)
+        .max_satisfaction_weight()
+        .expect("Unsupported descriptor");
+    assert!(
+        deprecated_weight > current_weight,
+        "this test is only meaningful with keychains of differing weight, got {deprecated_weight} and {current_weight}"
+    );
+
+    let deprecated_addr = deprecated_keychain.get_address(AddressIndex::New)?;
+    let current_addr = current_keychain.get_address(AddressIndex::New)?;
+
+    let bitcoind = helpers::bitcoind_client().await?;
+    // Deliberately small: this test only cares about input weights, and modest
+    // amounts keep it fundable however far the regtest subsidy has halved.
+    helpers::fund_addr(&bitcoind, &deprecated_addr, 500_000)?;
+    helpers::fund_addr(&bitcoind, &current_addr, 1_000_000)?;
+    helpers::gen_blocks(&bitcoind, 10)?;
+
+    let blockchain = helpers::electrum_blockchain().await?;
+    for _ in 0..5 {
+        deprecated_keychain.sync(&blockchain, Default::default())?;
+        current_keychain.sync(&blockchain, Default::default())?;
+        if deprecated_keychain.get_balance()?.get_spendable() > 0
+            && current_keychain.get_balance()?.get_spendable() > 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    assert!(
+        deprecated_keychain.get_balance()?.get_spendable() > 0,
+        "deprecated keychain never saw its funding"
+    );
+    assert!(
+        current_keychain.get_balance()?.get_spendable() > 0,
+        "current keychain never saw its funding"
+    );
+
+    let cfg = PsbtBuilderConfig::builder()
+        .consolidate_deprecated_keychains(true)
+        .fee_rate(BoundedFeeRate::unchecked(FeeRate::from_sat_per_vb(5.0)))
+        .build()
+        .unwrap();
+
+    let wallet_id = WalletId::new();
+    let deprecated_keychain_id = uuid::uuid!("00000000-0000-0000-0000-000000000011").into();
+    let current_keychain_id = uuid::uuid!("00000000-0000-0000-0000-000000000012").into();
+    let destination = Address::parse_from_trusted_source("mgWUuj1J1N882jmqFxtDepEC73Rr22E9GU");
+    let payouts = vec![(Uuid::new_v4(), destination, Satoshis::from(700_000_u64))];
+
+    let FinishedPsbtBuild {
+        psbt,
+        estimated_vbytes,
+        included_utxos,
+        ..
+    } = PsbtBuilder::new(cfg)
+        .wallet_payouts(wallet_id, payouts)
+        .visit_bdk_wallet(deprecated_keychain_id, &deprecated_keychain)?
+        .accept_current_keychain()
+        .visit_bdk_wallet(current_keychain_id, &current_keychain)?
+        .finish();
+
+    let keychain_utxos = included_utxos
+        .get(&wallet_id)
+        .expect("wallet not included in utxos");
+    let deprecated_outpoints: std::collections::HashSet<_> = keychain_utxos
+        .get(&deprecated_keychain_id)
+        .expect("deprecated keychain not included in utxos")
+        .iter()
+        .copied()
+        .collect();
+    let current_outpoints: std::collections::HashSet<_> = keychain_utxos
+        .get(&current_keychain_id)
+        .expect("current keychain not included in utxos")
+        .iter()
+        .copied()
+        .collect();
+    assert!(!deprecated_outpoints.is_empty());
+    assert!(!current_outpoints.is_empty());
+
+    let psbt = psbt.expect("unsigned psbt");
+    let mut expected_satisfaction = 0usize;
+    for input in psbt.unsigned_tx.input.iter() {
+        let outpoint = input.previous_output;
+        if deprecated_outpoints.contains(&outpoint) {
+            expected_satisfaction += deprecated_weight;
+        } else {
+            assert!(
+                current_outpoints.contains(&outpoint),
+                "input {outpoint} belongs to neither keychain"
+            );
+            expected_satisfaction += current_weight;
+        }
+    }
+    // 2 for the segwit marker and flag, as the builder does
+    let expected_vbytes = (psbt.unsigned_tx.weight()
+        + bdk::bitcoin::Weight::from_wu((expected_satisfaction + 2) as u64))
+    .to_vbytes_ceil();
+
+    assert_eq!(estimated_vbytes, Some(expected_vbytes));
+
+    Ok(())
+}
+
 async fn find_tx_id(
     pool: &sqlx::PgPool,
     keychain_id: Uuid,

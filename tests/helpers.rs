@@ -181,6 +181,29 @@ pub fn random_bdk_wallet() -> anyhow::Result<bdk::Wallet<MemoryDatabase>> {
     Ok(wallet)
 }
 
+/// A wallet whose inputs are markedly heavier to satisfy than `random_bdk_wallet`'s,
+/// for exercising batches that mix descriptors of different weights.
+pub fn random_multisig_bdk_wallet(
+    threshold: usize,
+    n_keys: usize,
+) -> anyhow::Result<bdk::Wallet<MemoryDatabase>> {
+    let secp = Secp256k1::new();
+    let mut keys = Vec::with_capacity(n_keys);
+    for _ in 0..n_keys {
+        let sk: GeneratedKey<PrivateKey, Segwitv0> =
+            PrivateKey::generate(PrivateKeyGenerateOptions::default())?;
+        keys.push(sk.into_key().to_string());
+    }
+    let wallet = bdk::Wallet::new(
+        format!("wsh(sortedmulti({threshold},{}))", keys.join(","))
+            .into_wallet_descriptor(&secp, bitcoin::Network::Regtest)?,
+        None,
+        bitcoin::Network::Regtest,
+        MemoryDatabase::new(),
+    )?;
+    Ok(wallet)
+}
+
 fn read_to_base64(path: impl Into<std::path::PathBuf>) -> anyhow::Result<String> {
     use std::fs::File;
     use std::io::BufReader;

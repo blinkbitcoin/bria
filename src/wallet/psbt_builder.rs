@@ -527,8 +527,16 @@ impl BdkWalletVisitor for PsbtBuilder<AcceptingCurrentKeychainState> {
                 self.result.fee_satoshis = fee_satoshis;
 
                 for input in psbt.unsigned_tx.input.iter() {
+                    // This psbt carries the foreign inputs accumulated from
+                    // deprecated keychains and from earlier wallets as well as
+                    // this keychain's own, and each of those was added with the
+                    // weight of the descriptor that will satisfy it. Only record
+                    // a weight for an outpoint seen here for the first time, or
+                    // the heavier descriptors get overwritten with this one and
+                    // the size estimate understates the transaction.
                     self.input_weights
-                        .insert(input.previous_output, keychain_satisfaction_weight);
+                        .entry(input.previous_output)
+                        .or_insert(keychain_satisfaction_weight);
                     if self.all_included_utxos.insert(input.previous_output) {
                         self.result
                             .included_utxos
