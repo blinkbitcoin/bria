@@ -1,7 +1,7 @@
 use bdk::{
     database::BatchDatabase,
     wallet::{tx_builder::TxOrdering, AddressIndex, AddressInfo},
-    FeeRate, Wallet,
+    Wallet,
 };
 use derive_builder::Builder;
 use std::{
@@ -13,6 +13,7 @@ use tracing::instrument;
 use super::{keychain::*, Wallet as WalletEntity};
 use crate::{
     bdk::error::BdkError,
+    fees::BoundedFeeRate,
     primitives::{bitcoin::*, *},
     utxo::CpfpUtxo,
 };
@@ -44,6 +45,9 @@ pub struct FinishedPsbtBuild {
     pub fee_satoshis: Satoshis,
     pub tx_id: Option<bitcoin::Txid>,
     pub psbt: Option<psbt::PartiallySignedTransaction>,
+    /// Size the fee was computed over, including the satisfaction weight the
+    /// inputs will take once signed. `None` when no psbt was built.
+    pub estimated_vbytes: Option<u64>,
 }
 
 impl FinishedPsbtBuild {
@@ -67,7 +71,7 @@ impl FinishedPsbtBuild {
 #[builder(pattern = "owned")]
 pub struct PsbtBuilderConfig {
     consolidate_deprecated_keychains: bool,
-    fee_rate: FeeRate,
+    fee_rate: BoundedFeeRate,
     #[builder(default)]
     reserved_utxos: HashMap<KeychainId, Vec<OutPoint>>,
     #[builder(default)]
@@ -182,6 +186,24 @@ impl<T> PsbtBuilder<T> {
             }
         }
 
+        ret.estimated_vbytes = ret.psbt.as_ref().map(|psbt| {
+            let satisfaction_weight: usize = psbt
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|input| {
+                    self.input_weights
+                        .get(&input.previous_output)
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .sum();
+            // 2 for the segwit marker and flag, as in fees::estimate_proportional_fee
+            (psbt.unsigned_tx.weight()
+                + bdk::bitcoin::Weight::from_wu((satisfaction_weight + 2) as u64))
+            .to_vbytes_ceil()
+        });
+
         // Identify signing keychains
         for (wallet_id, keychain_utxos) in ret.included_utxos.iter() {
             let sum = ret
@@ -241,6 +263,7 @@ impl PsbtBuilder<InitialPsbtBuilderState> {
                 fee_satoshis: Satoshis::from(0),
                 tx_id: None,
                 psbt: None,
+                estimated_vbytes: None,
             },
             _phantom: PhantomData,
         }
@@ -302,7 +325,7 @@ impl BdkWalletVisitor for PsbtBuilder<AcceptingDeprecatedKeychainState> {
             }
         }
         builder
-            .fee_rate(self.cfg.fee_rate)
+            .fee_rate(*self.cfg.fee_rate)
             .sighash(DEFAULT_SIGHASH_TYPE.into())
             .drain_wallet()
             .drain_to(drain_address.script_pubkey());
@@ -504,8 +527,16 @@ impl BdkWalletVisitor for PsbtBuilder<AcceptingCurrentKeychainState> {
                 self.result.fee_satoshis = fee_satoshis;
 
                 for input in psbt.unsigned_tx.input.iter() {
+                    // This psbt carries the foreign inputs accumulated from
+                    // deprecated keychains and from earlier wallets as well as
+                    // this keychain's own, and each of those was added with the
+                    // weight of the descriptor that will satisfy it. Only record
+                    // a weight for an outpoint seen here for the first time, or
+                    // the heavier descriptors get overwritten with this one and
+                    // the size estimate understates the transaction.
                     self.input_weights
-                        .insert(input.previous_output, keychain_satisfaction_weight);
+                        .entry(input.previous_output)
+                        .or_insert(keychain_satisfaction_weight);
                     if self.all_included_utxos.insert(input.previous_output) {
                         self.result
                             .included_utxos
@@ -560,7 +591,7 @@ impl PsbtBuilder<AcceptingCurrentKeychainState> {
         change_address: &AddressInfo,
     ) -> Result<(u64, Vec<OutPoint>, bool), BdkError> {
         let mut builder = wallet.build_tx();
-        builder.fee_rate(self.cfg.fee_rate);
+        builder.fee_rate(*self.cfg.fee_rate);
         builder.drain_to(change_address.script_pubkey());
         if let Some(sats_with_jitter) = self.cfg.force_min_change_output_with_jitter() {
             builder.add_recipient(change_address.script_pubkey(), u64::from(sats_with_jitter));

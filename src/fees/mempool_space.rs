@@ -6,6 +6,8 @@ use tracing::instrument;
 use super::error::FeeEstimationError;
 use crate::primitives::TxPriority;
 
+const PROVIDER: &str = "mempool_space";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RecommendedFeesResponse {
@@ -63,15 +65,12 @@ impl MempoolSpaceClient {
                 );
                 FeeEstimationError::CouldNotDecodeResponseBody(err)
             })?;
-        match priority {
-            TxPriority::HalfHour => Ok(FeeRate::from_sat_per_vb(
-                fee_estimations.half_hour_fee as f32,
-            )),
-            TxPriority::OneHour => Ok(FeeRate::from_sat_per_vb(fee_estimations.hour_fee as f32)),
-            TxPriority::NextBlock => {
-                Ok(FeeRate::from_sat_per_vb(fee_estimations.fastest_fee as f32))
-            }
-        }
+        let sat_per_vb = match priority {
+            TxPriority::HalfHour => fee_estimations.half_hour_fee,
+            TxPriority::OneHour => fee_estimations.hour_fee,
+            TxPriority::NextBlock => fee_estimations.fastest_fee,
+        };
+        super::bounds::checked_fee_rate(sat_per_vb as f64, PROVIDER, priority)
     }
 }
 

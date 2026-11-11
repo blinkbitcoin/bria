@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use super::{blockstream::*, config::*, error::*, mempool_space::*};
+use super::{blockstream::*, bounds::*, config::*, error::*, mempool_space::*};
 use crate::primitives::TxPriority;
 
 #[derive(Clone, Debug)]
@@ -45,29 +45,83 @@ pub struct FeesClient {
     cache: Arc<Mutex<HashMap<TxPriority, CachedFeeRate>>>,
     locks: PriorityLocks,
     cache_config: FeeCacheConfig,
+    bounds: FeeBounds,
 }
 
-fn record_fee_rate(fee_rate: FeeRate) {
-    tracing::Span::current().record("fee_rate", tracing::field::debug(fee_rate));
+fn record_fee_rate(fee_rate: BoundedFeeRate) {
+    tracing::Span::current().record("fee_rate", tracing::field::debug(*fee_rate));
 }
 
 impl FeesClient {
     pub fn new(config: FeesConfig) -> Self {
         let cache_config = FeeCacheConfig::from(&config);
+        let bounds = FeeBounds::from_config(&config);
         Self {
             mempool_space: MempoolSpaceClient::new(config.mempool_space),
             blockstream: BlockstreamClient::new(config.blockstream),
             cache: Arc::new(Mutex::new(HashMap::new())),
             locks: PriorityLocks::new(),
             cache_config,
+            bounds,
         }
     }
 
+    /// Fee rate for building a transaction. Bounded by the configured range;
+    /// an estimate above `max_sat_per_vb` is refused rather than silently
+    /// turned into a transaction that pays it.
     #[instrument(name = "fees.fee_rate", skip(self), fields(fee_rate), err)]
-    pub async fn fee_rate(&self, priority: TxPriority) -> Result<FeeRate, FeeEstimationError> {
+    pub async fn fee_rate(
+        &self,
+        priority: TxPriority,
+    ) -> Result<BoundedFeeRate, FeeEstimationError> {
+        let fee_rate = self
+            .bounds
+            .enforce(self.estimated_fee_rate(priority).await?, priority)?;
+        record_fee_rate(fee_rate);
+        Ok(fee_rate)
+    }
+
+    /// Fee rate for internal accounting, such as the spending fees encumbered
+    /// during a wallet sync. Always clamped into the configured range: no funds
+    /// move, and syncing must not stop because the estimators are off.
+    #[instrument(
+        name = "fees.fee_rate_for_accounting",
+        skip(self),
+        fields(fee_rate),
+        err
+    )]
+    pub async fn fee_rate_for_accounting(
+        &self,
+        priority: TxPriority,
+    ) -> Result<BoundedFeeRate, FeeEstimationError> {
+        let fee_rate = self
+            .bounds
+            .clamp(self.estimated_fee_rate(priority).await?, priority);
+        record_fee_rate(fee_rate);
+        Ok(fee_rate)
+    }
+
+    /// Checks a finished batch's absolute fee against the rate it was built
+    /// at. See [`FeeBounds::check_batch_fee`].
+    #[instrument(name = "fees.check_batch_fee", skip(self), err)]
+    pub fn check_batch_fee(
+        &self,
+        fee_sats: u64,
+        cpfp_fee_sats: u64,
+        vbytes: u64,
+        fee_rate: BoundedFeeRate,
+    ) -> Result<(), BatchFeeError> {
+        self.bounds
+            .check_batch_fee(fee_sats, cpfp_fee_sats, vbytes, fee_rate)
+    }
+
+    /// The raw estimate from the cache or the providers, before any bounds.
+    async fn estimated_fee_rate(
+        &self,
+        priority: TxPriority,
+    ) -> Result<FeeRate, FeeEstimationError> {
         if let Some(cached) = self.try_cache_hit(priority).await {
             tracing::debug!(source = cached.source, "fee cache hit");
-            record_fee_rate(cached.fee_rate);
             return Ok(cached.fee_rate);
         }
 
@@ -76,7 +130,6 @@ impl FeesClient {
 
         if let Some(cached) = self.try_cache_hit(priority).await {
             tracing::debug!(source = cached.source, "fee cache hit after wait");
-            record_fee_rate(cached.fee_rate);
             return Ok(cached.fee_rate);
         }
 
@@ -100,7 +153,6 @@ impl FeesClient {
                                     stale_age_seconds,
                                     "fee providers failed, returning stale cached fee"
                                 );
-                                record_fee_rate(stale.fee_rate);
                                 return Ok(stale.fee_rate);
                             }
                         }
@@ -119,7 +171,6 @@ impl FeesClient {
             },
         );
 
-        record_fee_rate(fetched_fee_rate);
         Ok(fetched_fee_rate)
     }
 

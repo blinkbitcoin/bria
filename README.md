@@ -27,6 +27,7 @@ Bria enables transaction batching and UTXO management providing the liquidity of
   - you can configure multiple wallets scoped to an account
   - signing via multiple supported remote signers including feeding PSBTs manually
   - transaction batching via configurable payout queues (check the demo for details)
+  - fee rates from external estimators are bounded, with alerts when a bound is hit (see [fee bounds](docs/fee-bounds.md))
 
 - cloud ready - intended for use as part of a distributed system
   - designed to be horizontally scalable

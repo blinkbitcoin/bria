@@ -47,6 +47,13 @@ impl Config {
             ));
         }
         config.app.signer_encryption.key = EncryptionKey::clone_from_slice(key_bytes.as_ref());
+
+        config
+            .app
+            .fees
+            .validate()
+            .context("Invalid fee bounds configuration")?;
+
         Ok(config)
     }
 }

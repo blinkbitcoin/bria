@@ -1,5 +1,5 @@
-#![allow(warnings)]
 mod blockstream;
+mod bounds;
 mod client;
 mod config;
 pub mod error;
@@ -95,6 +95,7 @@ fn build_http_client(
 }
 
 pub use blockstream::*;
+pub use bounds::*;
 pub use client::*;
 pub use config::*;
 pub use mempool_space::*;
@@ -109,7 +110,9 @@ pub async fn fees_to_encumber(
     fees_client: &FeesClient,
     satisfaction_weight: usize,
 ) -> Result<Satoshis, FeeEstimationError> {
-    let fee_rate = fees_client.fee_rate(TxPriority::NextBlock).await?;
+    let fee_rate = fees_client
+        .fee_rate_for_accounting(TxPriority::NextBlock)
+        .await?;
     Ok(Satoshis::from(fee_rate.fee_wu(Weight::from_wu(
         (TXIN_BASE_WEIGHT + satisfaction_weight) as u64,
     ))))
@@ -210,6 +213,10 @@ pub fn output_fee(fee_rate: &bitcoin::FeeRate, script_pubkey: bitcoin::ScriptBuf
 mod tests {
     use super::*;
 
+    // max_satisfaction_weight is deprecated in miniscript, but it is what the
+    // wallet code uses to size inputs, so the fee assertion below has to use
+    // the same measure.
+    #[allow(deprecated)]
     #[test]
     fn test_fee_calculation() {
         // Reference tx https://blockstream.info/tx/c6260b24a8234f7cb6bd0698634d9056c1a3927a89ab5f98c0dcba199198f187
