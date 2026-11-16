@@ -7,4 +7,10 @@ ignore = [
     # rust_decimal locks optional rkyv 0.7, inactive in the current feature tree.
     # Remove when rust_decimal drops it or resolves patched rkyv >=0.8.17.
     "RUSTSEC-2026-0235",
+
+    # sqlx 0.8 locks sqlx-sqlite, which pulls libsqlite3-sys 0.30 (bundled SQLite
+    # < 3.54). The sqlite feature is not enabled, so it is not compiled
+    # (`cargo tree -i libsqlite3-sys --all-features --target all` is empty).
+    # The patched libsqlite3-sys >=0.39 needs sqlx 0.9; remove on that upgrade.
+    "RUSTSEC-2026-0459",
 ]
