@@ -1069,7 +1069,7 @@ impl App {
             .list_for_batch(profile.account_id, batch_id)
             .await?;
 
-        for (_wallet_id, wallet_payouts) in payouts.iter() {
+        for wallet_payouts in payouts.values() {
             for payout in wallet_payouts {
                 // Skip committed check since we're cancelling the whole batch
                 // and we've already verified the batch isn't signed

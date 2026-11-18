@@ -1,5 +1,9 @@
 #![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
 #![cfg_attr(feature = "fail-on-warnings", deny(clippy::all))]
+// The crate's error enums are ~340 bytes, so nearly every Result trips this lint
+// on clippy >= 1.99. Boxing the large variants is a refactor of its own; allow it
+// until then.
+#![allow(clippy::result_large_err)]
 
 pub mod account;
 pub mod address;
