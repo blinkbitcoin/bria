@@ -43,9 +43,9 @@ pub struct FeesConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnMaxExceeded {
-    /// Refuse to use the rate. The payout queue job errors out and the batch is
-    /// retried on the next tick, so no transaction is built while the reading
-    /// stands. This is the default: a batch built at a clamped-down rate is
+    /// Refuse to use the rate. The payout queue job ends without a batch and
+    /// the queue is processed again on its next tick, so no transaction is
+    /// built while the reading stands. This is the default: a batch built at a clamped-down rate is
     /// signed and broadcast within seconds, cannot be cancelled afterwards, and
     /// holds its inputs reserved until it confirms.
     #[default]

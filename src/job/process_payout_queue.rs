@@ -5,7 +5,7 @@ use tracing::instrument;
 use super::error::JobError;
 use crate::{
     batch::*,
-    fees::{BoundedFeeRate, FeesClient},
+    fees::{error::FeeEstimationError, BoundedFeeRate, FeesClient},
     payout::*,
     payout_queue::*,
     primitives::*,
@@ -37,7 +37,8 @@ pub struct ProcessPayoutQueueData {
         total_change_sats,
         psbt,
         batch_id,
-        payout_queue_id
+        payout_queue_id,
+        deferred
     ),
     err
 )]
@@ -70,9 +71,14 @@ pub(super) async fn execute<'a>(
             PayoutSelectionMode::Payout,
         )
         .await?;
-    let fee_rate = fees_client
-        .fee_rate(payout_queue.config.tx_priority)
-        .await?;
+    // Defer rather than fail: a failed job retries in place on the ordered payout channel and blocks the account's other queues.
+    let fee_rate = match fees_client.fee_rate(payout_queue.config.tx_priority).await {
+        Ok(fee_rate) => fee_rate,
+        Err(err @ FeeEstimationError::FeeRateAboveMaximum { .. }) => {
+            return Ok(deferred(data, &err));
+        }
+        Err(err) => return Err(err.into()),
+    };
     tracing::Span::current().record("fee_rate_sat_per_vb", f64::from(fee_rate.as_sat_per_vb()));
     let FinishedPsbtBuild {
         psbt,
@@ -119,12 +125,14 @@ pub(super) async fn execute<'a>(
         // Last stop before the batch exists: the fee has to match the rate it
         // was built at, whatever the builder arithmetic did.
         if let Some(vbytes) = estimated_vbytes {
-            fees_client.check_batch_fee(
+            if let Err(err) = fees_client.check_batch_fee(
                 u64::from(fee_satoshis),
                 u64::from(cpfp_fee_sats),
                 vbytes,
                 fee_rate,
-            )?;
+            ) {
+                return Ok(deferred(data, &err));
+            }
         }
         let batch = NewBatch::builder()
             .account_id(data.account_id)
@@ -188,6 +196,20 @@ pub(super) async fn execute<'a>(
         }
         Ok((data, None))
     }
+}
+
+/// Ends the job without a batch; the tx rolls back on drop and payouts stay unbatched.
+#[allow(clippy::type_complexity)]
+fn deferred<'a>(
+    data: ProcessPayoutQueueData,
+    reason: &dyn std::fmt::Display,
+) -> (
+    ProcessPayoutQueueData,
+    Option<(sqlx::Transaction<'a, sqlx::Postgres>, Vec<WalletId>)>,
+) {
+    tracing::Span::current().record("deferred", tracing::field::display(reason));
+    tracing::warn!(reason = %reason, "payout queue deferred to its next tick");
+    (data, None)
 }
 
 #[allow(clippy::too_many_arguments)]

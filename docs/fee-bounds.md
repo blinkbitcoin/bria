@@ -33,6 +33,12 @@ then falls through the normal chain: mempool.space, then blockstream.info, then
 a cached value if `enable_stale_on_error` allows it, then an error. A rejected
 reading is never cached, so it cannot outlive the provider recovering.
 
+A mempool.space reading that is plausible but above `max_sat_per_vb` is not
+acted on alone, because on the spending paths it halts batching: blockstream.info
+is asked as well and the lower of the two readings is used (and cached). If
+blockstream.info is unavailable, the mempool.space reading stands and the
+consumer bounds below apply to it.
+
 The hard ceiling is not configurable because no market condition produces it:
 the most extreme organic fee events have peaked around 1_000 sat/vB and only
 briefly. `max_sat_per_vb` is the knob for operator policy.
@@ -42,16 +48,23 @@ from the cache:
 
 | Path | Below `min_sat_per_vb` | Above `max_sat_per_vb` |
 |---|---|---|
-| building a batch (`process_payout_queue`) | raised to the minimum | refused: the job errors and the batch is retried on the next queue tick (or clamped, with `on_max_exceeded: clamp`) |
+| building a batch (`process_payout_queue`) | raised to the minimum | refused: the job ends without a batch and the queue is processed again on its next tick (or clamped, with `on_max_exceeded: clamp`) |
 | fee quotes (`EstimatePayoutFee`) | raised to the minimum | refused, so a quote cannot promise a rate the batcher will not use |
-| fee encumbrance during a wallet sync | raised to the minimum | clamped to the maximum: no funds move and syncing must not stop |
+| fee encumbrance during a wallet sync | raised to the minimum | clamped to the maximum: no funds move |
 
 `reject` is the default on the spending paths because a batch built at a
 clamped-down rate is signed and broadcast within seconds, cannot be cancelled
 afterwards, and holds its inputs reserved until it confirms - so clamping during
 a genuine spike can block a queue for longer than deferring the batch would.
 Payouts are never dropped: they stay unbatched and are picked up on the next
-tick.
+tick. The job does not fail, because a failed job is retried in place on the
+account's ordered payout channel and would hold up the account's other queues.
+
+The encumbrance path keeps working through a provider outage: once both
+providers fail and no cached value is within `stale_ttl`, it uses the last
+reading this process obtained, however old, whatever `enable_stale_on_error`
+says. It only fails if no reading has been obtained since startup, in which
+case the wallet sync is retried.
 
 ## The batch guard
 
@@ -69,8 +82,8 @@ at or below 25_000 sats are not checked at all, because bdk folds a change
 output that would be dust into the fee, which moves a small absolute fee by a
 large factor.
 
-A batch that trips the guard is not created; the job errors and the payouts are
-picked up on the next tick, exactly as for a refused rate. Tripping it means
+A batch that trips the guard is not created; the job ends without a batch and
+the payouts are picked up on the next tick, exactly as for a refused rate. Tripping it means
 there is a bug in the fee arithmetic - it is worth paging someone.
 
 ## Alerting
@@ -82,12 +95,15 @@ them.
 |---|---|---|---|
 | `rejected implausible fee estimate` | `bria::fees::bounds` | WARN | `provider`, `priority`, `value`, `hard_max_sat_per_vb` |
 | `fee estimate above configured maximum` | `bria::fees::bounds` | ERROR | `priority`, `observed_sat_per_vb`, `max_sat_per_vb`, `action` (`reject` or `clamp`) |
+| `mempool_space estimate above configured maximum, checking blockstream` | `bria::fees::bounds` | WARN | `priority`, `observed_sat_per_vb`, `max_sat_per_vb`, `action` (`cross_check`) |
+| `fee providers failed; accounting with the last known estimate` | `bria::fees::bounds` | WARN | `priority`, `error`, `source`, `age_seconds`, `action` (`last_reading`) |
 | `fee estimate below configured minimum` | `bria::fees::bounds` | WARN | `priority`, `observed_sat_per_vb`, `min_sat_per_vb`, `action` (`floor`) |
 | `batch fee is inconsistent with the fee rate it was built at` | `bria::fees::bounds` | ERROR | `observed_sats`, `expected_sats`, `allowed_sats`, `vbytes`, `sat_per_vb`, `tolerance`, `action` (`reject`) |
 | `invalid fee bound config value; using the default` | `bria::fees::bounds` | WARN | `field`, `configured`, `default` |
 
-A refused reading also surfaces on the `job.process_payout_queue` span as a
-`FeeRateAboveMaximum` error, and that span records `fee_rate_sat_per_vb` for
+A refused reading or a tripped batch guard also shows on the
+`job.process_payout_queue` span: the job succeeds without a batch and its
+`deferred` field holds the reason. The span records `fee_rate_sat_per_vb` for
 every batch it does build.
 
 ## When an alert fires

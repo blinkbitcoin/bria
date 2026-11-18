@@ -9,7 +9,7 @@ use crate::primitives::TxPriority;
 
 /// Tracing target for the bounds alerts, so that operators have a stable thing
 /// to alert on. `action` says what was done: "floor", "clamp" or "reject".
-const ALERT_TARGET: &str = "bria::fees::bounds";
+pub(super) const ALERT_TARGET: &str = "bria::fees::bounds";
 
 /// A batch fee at or below this is too small for the consistency check to say
 /// anything useful: bdk folds a change output that would be dust into the fee,
@@ -138,6 +138,15 @@ impl FeeBounds {
             on_max_exceeded: config.on_max_exceeded,
             max_batch_fee_tolerance,
         }
+    }
+
+    /// Whether a reading would be refused (or clamped) on a spending path.
+    pub(super) fn exceeds_max(&self, fee_rate: FeeRate) -> bool {
+        f64::from(fee_rate.as_sat_per_vb()) > self.max_sat_per_vb
+    }
+
+    pub(super) fn max_sat_per_vb(&self) -> f64 {
+        self.max_sat_per_vb
     }
 
     /// Bounds a rate that is about to be used to build a transaction. A reading

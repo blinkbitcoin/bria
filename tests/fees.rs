@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use bria::{fees::*, primitives::TxPriority};
+use bria::{
+    fees::{error::FeeEstimationError, *},
+    primitives::TxPriority,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -412,4 +415,111 @@ async fn cached_estimate_is_still_bounded() {
     assert_eq!(clamped.as_sat_per_vb(), 1_000.0);
 
     assert!(client.fee_rate(TxPriority::NextBlock).await.is_err());
+}
+
+#[tokio::test]
+async fn primary_above_configured_max_is_cross_checked_against_blockstream() {
+    let server = MockServer::start().await;
+    // plausible at the provider boundary, above the configured max
+    mount_mempool(&server, 2_000).await;
+    mount_blockstream(&server, SANE_BLOCKSTREAM_BODY).await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
+
+    let first = client.fee_rate(TxPriority::NextBlock).await.unwrap();
+    // `expect(1)` on mempool: the second call is served from the cache, which
+    // holds blockstream's reading rather than the refused one.
+    let second = client.fee_rate(TxPriority::NextBlock).await.unwrap();
+
+    assert_eq!(first.as_sat_per_vb(), 12.0);
+    assert_eq!(second.as_sat_per_vb(), 12.0);
+}
+
+#[tokio::test]
+async fn both_providers_above_configured_max_uses_the_lower_reading() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 3_000).await;
+    mount_blockstream(&server, r#"{"1": 2000.0, "3": 10.0, "6": 5.0}"#).await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
+
+    match client.fee_rate(TxPriority::NextBlock).await {
+        Err(FeeEstimationError::FeeRateAboveMaximum { observed, .. }) => {
+            assert_eq!(observed, 2_000.0)
+        }
+        other => panic!("expected FeeRateAboveMaximum, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn primary_above_configured_max_is_used_when_blockstream_is_down() {
+    let server = MockServer::start().await;
+    mount_mempool(&server, 2_000).await;
+    Mock::given(method("GET"))
+        .and(path("/api/fee-estimates"))
+        .respond_with(unparsable_response())
+        .mount(&server)
+        .await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
+
+    assert!(matches!(
+        client.fee_rate(TxPriority::NextBlock).await,
+        Err(FeeEstimationError::FeeRateAboveMaximum { .. })
+    ));
+}
+
+#[tokio::test]
+async fn accounting_uses_the_last_reading_once_stale_ttl_has_passed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/fees/recommended"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(mempool_fee_response()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/fees/recommended"))
+        .respond_with(unparsable_response())
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/fee-estimates"))
+        .respond_with(unparsable_response())
+        .mount(&server)
+        .await;
+
+    let mut config = test_fees_config(server.uri(), server.uri());
+    config.cache_ttl = Duration::ZERO;
+    config.stale_ttl = Duration::ZERO;
+    let client = FeesClient::new(config);
+
+    let fresh = client.fee_rate(TxPriority::NextBlock).await.unwrap();
+    assert_eq!(fresh.as_sat_per_vb(), 20.0);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // Both providers are down and the reading is past stale_ttl: spending
+    // refuses it, accounting still uses it.
+    assert!(client.fee_rate(TxPriority::NextBlock).await.is_err());
+    let accounting = client
+        .fee_rate_for_accounting(TxPriority::NextBlock)
+        .await
+        .unwrap();
+    assert_eq!(accounting.as_sat_per_vb(), 20.0);
+}
+
+#[tokio::test]
+async fn accounting_fails_when_no_reading_was_ever_obtained() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(unparsable_response())
+        .mount(&server)
+        .await;
+
+    let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
+
+    assert!(client
+        .fee_rate_for_accounting(TxPriority::NextBlock)
+        .await
+        .is_err());
 }

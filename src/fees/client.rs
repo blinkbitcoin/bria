@@ -81,9 +81,7 @@ impl FeesClient {
         Ok(fee_rate)
     }
 
-    /// Fee rate for internal accounting, such as the spending fees encumbered
-    /// during a wallet sync. Always clamped into the configured range: no funds
-    /// move, and syncing must not stop because the estimators are off.
+    /// Fee rate for accounting (sync encumbrance): clamped, and falls back to the last reading of any age if all providers fail.
     #[instrument(
         name = "fees.fee_rate_for_accounting",
         skip(self),
@@ -94,9 +92,25 @@ impl FeesClient {
         &self,
         priority: TxPriority,
     ) -> Result<BoundedFeeRate, FeeEstimationError> {
-        let fee_rate = self
-            .bounds
-            .clamp(self.estimated_fee_rate(priority).await?, priority);
+        let estimate = match self.estimated_fee_rate(priority).await {
+            Ok(fee_rate) => fee_rate,
+            Err(err) => {
+                let Some(last) = self.cache.lock().await.get(&priority).cloned() else {
+                    return Err(err);
+                };
+                tracing::warn!(
+                    target: ALERT_TARGET,
+                    ?priority,
+                    error = %err,
+                    source = last.source,
+                    age_seconds = last.fetched_at.elapsed().as_secs_f64(),
+                    action = "last_reading",
+                    "fee providers failed; accounting with the last known estimate"
+                );
+                last.fee_rate
+            }
+        };
+        let fee_rate = self.bounds.clamp(estimate, priority);
         record_fee_rate(fee_rate);
         Ok(fee_rate)
     }
@@ -134,7 +148,31 @@ impl FeesClient {
         }
 
         let (fetched_fee_rate, fetched_source) = match self.mempool_space.fee_rate(priority).await {
-            Ok(fee_rate) => (fee_rate, "mempool_space"),
+            Ok(fee_rate) if !self.bounds.exceeds_max(fee_rate) => (fee_rate, "mempool_space"),
+            Ok(primary) => {
+                // Above max halts batching, so don't take one provider's word: use the lower of the two.
+                tracing::warn!(
+                    target: ALERT_TARGET,
+                    ?priority,
+                    observed_sat_per_vb = f64::from(primary.as_sat_per_vb()),
+                    max_sat_per_vb = self.bounds.max_sat_per_vb(),
+                    action = "cross_check",
+                    "mempool_space estimate above configured maximum, checking blockstream"
+                );
+                match self.blockstream.fee_rate(priority).await {
+                    Ok(secondary) if secondary.as_sat_per_vb() < primary.as_sat_per_vb() => {
+                        (secondary, "blockstream")
+                    }
+                    Ok(_) => (primary, "mempool_space"),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "blockstream fee estimation failed, keeping the mempool_space estimate"
+                        );
+                        (primary, "mempool_space")
+                    }
+                }
+            }
             Err(err) => {
                 tracing::warn!(
                     error = %err,
