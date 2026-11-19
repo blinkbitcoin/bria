@@ -143,7 +143,7 @@ impl<T> PsbtBuilder<T> {
             let outputs = &psbt.unsigned_tx.output;
 
             // Identify change outputs
-            for (_, total) in ret.wallet_totals.iter_mut() {
+            for total in ret.wallet_totals.values_mut() {
                 if total.change_satoshis == Satoshis::ZERO {
                     continue;
                 }
