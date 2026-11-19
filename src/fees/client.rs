@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use super::{blockstream::*, config::*, error::*, mempool_space::*};
+use super::{blockstream::*, bounds::*, config::*, error::*, mempool_space::*};
 use crate::primitives::TxPriority;
 
 #[derive(Clone, Debug)]
@@ -45,29 +45,93 @@ pub struct FeesClient {
     cache: Arc<Mutex<HashMap<TxPriority, CachedFeeRate>>>,
     locks: PriorityLocks,
     cache_config: FeeCacheConfig,
+    bounds: FeeBounds,
 }
 
-fn record_fee_rate(fee_rate: FeeRate) {
-    tracing::Span::current().record("fee_rate", tracing::field::debug(fee_rate));
+fn record_fee_rate(fee_rate: BoundedFeeRate) {
+    tracing::Span::current().record("fee_rate", tracing::field::debug(*fee_rate));
 }
 
 impl FeesClient {
     pub fn new(config: FeesConfig) -> Self {
         let cache_config = FeeCacheConfig::from(&config);
+        let bounds = FeeBounds::from_config(&config);
         Self {
             mempool_space: MempoolSpaceClient::new(config.mempool_space),
             blockstream: BlockstreamClient::new(config.blockstream),
             cache: Arc::new(Mutex::new(HashMap::new())),
             locks: PriorityLocks::new(),
             cache_config,
+            bounds,
         }
     }
 
+    /// Fee rate for spending: refused above `max_sat_per_vb` unless configured to clamp.
     #[instrument(name = "fees.fee_rate", skip(self), fields(fee_rate), err)]
-    pub async fn fee_rate(&self, priority: TxPriority) -> Result<FeeRate, FeeEstimationError> {
+    pub async fn fee_rate(
+        &self,
+        priority: TxPriority,
+    ) -> Result<BoundedFeeRate, FeeEstimationError> {
+        let fee_rate = self
+            .bounds
+            .enforce(self.estimated_fee_rate(priority).await?, priority)?;
+        record_fee_rate(fee_rate);
+        Ok(fee_rate)
+    }
+
+    /// Fee rate for accounting: clamped, and falls back to the last reading if providers fail.
+    #[instrument(
+        name = "fees.fee_rate_for_accounting",
+        skip(self),
+        fields(fee_rate),
+        err
+    )]
+    pub async fn fee_rate_for_accounting(
+        &self,
+        priority: TxPriority,
+    ) -> Result<BoundedFeeRate, FeeEstimationError> {
+        let estimate = match self.estimated_fee_rate(priority).await {
+            Ok(fee_rate) => fee_rate,
+            Err(err) => {
+                let Some(last) = self.cache.lock().await.get(&priority).cloned() else {
+                    return Err(err);
+                };
+                tracing::warn!(
+                    target: ALERT_TARGET,
+                    ?priority,
+                    error = %err,
+                    source = last.source,
+                    age_seconds = last.fetched_at.elapsed().as_secs_f64(),
+                    action = "last_reading",
+                    "fee providers failed; accounting with the last known estimate"
+                );
+                last.fee_rate
+            }
+        };
+        let fee_rate = self.bounds.clamp(estimate, priority);
+        record_fee_rate(fee_rate);
+        Ok(fee_rate)
+    }
+
+    #[instrument(name = "fees.check_batch_fee", skip(self), err)]
+    pub fn check_batch_fee(
+        &self,
+        fee_sats: u64,
+        cpfp_fee_sats: u64,
+        vbytes: u64,
+        fee_rate: BoundedFeeRate,
+    ) -> Result<(), BatchFeeError> {
+        self.bounds
+            .check_batch_fee(fee_sats, cpfp_fee_sats, vbytes, fee_rate)
+    }
+
+    /// Raw estimate from the cache or providers, unbounded.
+    async fn estimated_fee_rate(
+        &self,
+        priority: TxPriority,
+    ) -> Result<FeeRate, FeeEstimationError> {
         if let Some(cached) = self.try_cache_hit(priority).await {
             tracing::debug!(source = cached.source, "fee cache hit");
-            record_fee_rate(cached.fee_rate);
             return Ok(cached.fee_rate);
         }
 
@@ -76,12 +140,35 @@ impl FeesClient {
 
         if let Some(cached) = self.try_cache_hit(priority).await {
             tracing::debug!(source = cached.source, "fee cache hit after wait");
-            record_fee_rate(cached.fee_rate);
             return Ok(cached.fee_rate);
         }
 
         let (fetched_fee_rate, fetched_source) = match self.mempool_space.fee_rate(priority).await {
-            Ok(fee_rate) => (fee_rate, "mempool_space"),
+            Ok(fee_rate) if !self.bounds.exceeds_max(fee_rate) => (fee_rate, "mempool_space"),
+            Ok(primary) => {
+                // Don't halt batching on one provider's word: use the lower reading.
+                tracing::warn!(
+                    target: ALERT_TARGET,
+                    ?priority,
+                    observed_sat_per_vb = f64::from(primary.as_sat_per_vb()),
+                    max_sat_per_vb = self.bounds.max_sat_per_vb(),
+                    action = "cross_check",
+                    "mempool_space estimate above configured maximum, checking blockstream"
+                );
+                match self.blockstream.fee_rate(priority).await {
+                    Ok(secondary) if secondary.as_sat_per_vb() < primary.as_sat_per_vb() => {
+                        (secondary, "blockstream")
+                    }
+                    Ok(_) => (primary, "mempool_space"),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "blockstream fee estimation failed, keeping the mempool_space estimate"
+                        );
+                        (primary, "mempool_space")
+                    }
+                }
+            }
             Err(err) => {
                 tracing::warn!(
                     error = %err,
@@ -100,7 +187,6 @@ impl FeesClient {
                                     stale_age_seconds,
                                     "fee providers failed, returning stale cached fee"
                                 );
-                                record_fee_rate(stale.fee_rate);
                                 return Ok(stale.fee_rate);
                             }
                         }
@@ -119,7 +205,6 @@ impl FeesClient {
             },
         );
 
-        record_fee_rate(fetched_fee_rate);
         Ok(fetched_fee_rate)
     }
 

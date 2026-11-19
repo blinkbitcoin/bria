@@ -294,7 +294,8 @@ e2e_load_context() {
 }
 
 start_daemon() {
-  SIGNER_ENCRYPTION_KEY="${SIGNER_ENCRYPTION_KEY}" background bria_cmd daemon --config ./tests/e2e/bria.${BRIA_CONFIG:-local}.yml run > .e2e-logs
+  local config="${1:-./tests/e2e/bria.${BRIA_CONFIG:-local}.yml}"
+  SIGNER_ENCRYPTION_KEY="${SIGNER_ENCRYPTION_KEY}" background bria_cmd daemon --config "${config}" run > .e2e-logs
   for i in {1..20}
   do
     if head .e2e-logs | grep -q 'Starting main server on port'; then

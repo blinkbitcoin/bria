@@ -4,7 +4,13 @@ use tracing::instrument;
 
 use super::error::JobError;
 use crate::{
-    batch::*, fees::FeesClient, payout::*, payout_queue::*, primitives::*, utxo::*, wallet::*,
+    batch::*,
+    fees::{error::FeeEstimationError, BoundedFeeRate, FeesClient},
+    payout::*,
+    payout_queue::*,
+    primitives::*,
+    utxo::*,
+    wallet::*,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,12 +31,14 @@ pub struct ProcessPayoutQueueData {
         n_reserved_utxos,
         n_cpfp_utxos,
         tx_id,
+        fee_rate_sat_per_vb,
         total_fee_sats,
         cpfp_fee_sats,
         total_change_sats,
         psbt,
         batch_id,
-        payout_queue_id
+        payout_queue_id,
+        deferred
     ),
     err
 )]
@@ -63,9 +71,16 @@ pub(super) async fn execute<'a>(
             PayoutSelectionMode::Payout,
         )
         .await?;
-    let fee_rate = fees_client
-        .fee_rate(payout_queue.config.tx_priority)
-        .await?;
+    // Defer, don't fail: a failed job retries in place and blocks the account's ordered channel.
+    let fee_rate = match fees_client.fee_rate(payout_queue.config.tx_priority).await {
+        Ok(fee_rate) => fee_rate,
+        Err(err @ FeeEstimationError::FeeRateAboveMaximum { .. }) => {
+            let page = unbatched_payouts.n_not_batched() > 0;
+            return Ok(deferred(data, &err, page));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    tracing::Span::current().record("fee_rate_sat_per_vb", f64::from(fee_rate.as_sat_per_vb()));
     let FinishedPsbtBuild {
         psbt,
         included_payouts,
@@ -73,6 +88,7 @@ pub(super) async fn execute<'a>(
         wallet_totals,
         tx_id,
         fee_satoshis,
+        estimated_vbytes,
         ..
     } = construct_psbt(
         &pool,
@@ -92,6 +108,9 @@ pub(super) async fn execute<'a>(
         span.record("psbt", tracing::field::display(&psbt));
 
         let wallet_ids = wallet_totals.keys().copied().collect();
+        let cpfp_fee_sats = wallet_totals
+            .values()
+            .fold(Satoshis::ZERO, |acc, v| acc + v.cpfp_fee_satoshis);
         span.record("batch_id", tracing::field::display(data.batch_id));
         span.record("total_fee_sats", tracing::field::display(fee_satoshis));
         span.record(
@@ -102,14 +121,18 @@ pub(super) async fn execute<'a>(
                     .fold(Satoshis::ZERO, |acc, v| acc + v.change_satoshis),
             ),
         );
-        span.record(
-            "cpfp_fee_sats",
-            tracing::field::display(
-                wallet_totals
-                    .values()
-                    .fold(Satoshis::ZERO, |acc, v| acc + v.cpfp_fee_satoshis),
-            ),
-        );
+        span.record("cpfp_fee_sats", tracing::field::display(cpfp_fee_sats));
+
+        if let Some(vbytes) = estimated_vbytes {
+            if let Err(err) = fees_client.check_batch_fee(
+                u64::from(fee_satoshis),
+                u64::from(cpfp_fee_sats),
+                vbytes,
+                fee_rate,
+            ) {
+                return Ok(deferred(data, &err, true));
+            }
+        }
         let batch = NewBatch::builder()
             .account_id(data.account_id)
             .id(data.batch_id)
@@ -146,7 +169,7 @@ pub(super) async fn execute<'a>(
                 data.account_id,
                 batch_id,
                 data.payout_queue_id,
-                fee_rate,
+                *fee_rate,
                 included_utxos,
             )
             .await?;
@@ -174,6 +197,35 @@ pub(super) async fn execute<'a>(
     }
 }
 
+/// Ends the job without a batch; the tx rolls back on drop and payouts stay unbatched.
+#[allow(clippy::type_complexity)]
+fn deferred<'a>(
+    data: ProcessPayoutQueueData,
+    reason: &dyn std::fmt::Display,
+    page: bool,
+) -> (
+    ProcessPayoutQueueData,
+    Option<(sqlx::Transaction<'a, sqlx::Postgres>, Vec<WalletId>)>,
+) {
+    tracing::Span::current().record("deferred", tracing::field::display(reason));
+    tracing::warn!(reason = %reason, "payout queue deferred to its next tick");
+    if page {
+        payout_queue_deferred(&reason.to_string());
+    }
+    (data, None)
+}
+
+/// Pages via the bria errors trigger: payouts are waiting and not moving.
+#[instrument(name = "job.payout_queue_deferred", fields(error = true, error.level, error.message))]
+fn payout_queue_deferred(reason: &str) {
+    let span = tracing::Span::current();
+    span.record(
+        "error.level",
+        tracing::field::display(&tracing::Level::ERROR),
+    );
+    span.record("error.message", reason);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn construct_psbt(
     pool: &sqlx::Pool<sqlx::Postgres>,
@@ -182,7 +234,7 @@ pub async fn construct_psbt(
     utxos: &Utxos,
     wallets: &Wallets,
     payout_queue: PayoutQueue,
-    fee_rate: bitcoin::FeeRate,
+    fee_rate: BoundedFeeRate,
     for_estimation: bool,
 ) -> Result<FinishedPsbtBuild, JobError> {
     let span = tracing::Span::current();
