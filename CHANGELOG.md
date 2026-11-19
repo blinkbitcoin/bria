@@ -1,3 +1,12 @@
+# [bria release v0.1.142](https://github.com/blinkbitcoin/bria/releases/tag/0.1.142)
+
+
+### Bug Fixes
+
+- Pin rust toolchain to 1.100.0
+- Resolve cargo audit failures (#82)
+- Upgrade Electrum TLS stack (#79)
+
 # [bria release v0.1.141](https://github.com/blinkbitcoin/bria/releases/tag/0.1.141)
 
 
