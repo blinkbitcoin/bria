@@ -75,7 +75,8 @@ pub(super) async fn execute<'a>(
     let fee_rate = match fees_client.fee_rate(payout_queue.config.tx_priority).await {
         Ok(fee_rate) => fee_rate,
         Err(err @ FeeEstimationError::FeeRateAboveMaximum { .. }) => {
-            return Ok(deferred(data, &err));
+            let page = unbatched_payouts.n_not_batched() > 0;
+            return Ok(deferred(data, &err, page));
         }
         Err(err) => return Err(err.into()),
     };
@@ -129,7 +130,7 @@ pub(super) async fn execute<'a>(
                 vbytes,
                 fee_rate,
             ) {
-                return Ok(deferred(data, &err));
+                return Ok(deferred(data, &err, true));
             }
         }
         let batch = NewBatch::builder()
@@ -201,13 +202,28 @@ pub(super) async fn execute<'a>(
 fn deferred<'a>(
     data: ProcessPayoutQueueData,
     reason: &dyn std::fmt::Display,
+    page: bool,
 ) -> (
     ProcessPayoutQueueData,
     Option<(sqlx::Transaction<'a, sqlx::Postgres>, Vec<WalletId>)>,
 ) {
     tracing::Span::current().record("deferred", tracing::field::display(reason));
     tracing::warn!(reason = %reason, "payout queue deferred to its next tick");
+    if page {
+        payout_queue_deferred(&reason.to_string());
+    }
     (data, None)
+}
+
+/// Pages via the bria errors trigger: payouts are waiting and not moving.
+#[instrument(name = "job.payout_queue_deferred", fields(error = true, error.level, error.message))]
+fn payout_queue_deferred(reason: &str) {
+    let span = tracing::Span::current();
+    span.record(
+        "error.level",
+        tracing::field::display(&tracing::Level::ERROR),
+    );
+    span.record("error.message", reason);
 }
 
 #[allow(clippy::too_many_arguments)]

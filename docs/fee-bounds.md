@@ -103,7 +103,10 @@ them.
 
 A refused reading or a tripped batch guard also shows on the
 `job.process_payout_queue` span: the job succeeds without a batch and its
-`deferred` field holds the reason. The span records `fee_rate_sat_per_vb` for
+`deferred` field holds the reason. When payouts are waiting, a child
+`job.payout_queue_deferred` span is recorded with `error = true` and
+`error.level = ERROR`, so it pages through the same trigger as other bria
+errors. An idle queue is deferred without paging. The span records `fee_rate_sat_per_vb` for
 every batch it does build.
 
 ## When an alert fires
