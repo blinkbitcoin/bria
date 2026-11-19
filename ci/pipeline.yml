@@ -16,6 +16,8 @@
 #@   "rust_task_image_config",
 #@   "charts_repo_resource",
 #@   "charts_repo_bot_branch",
+#@   "slack_resource",
+#@   "slack_resource_type",
 #@ )
 
 groups:
@@ -32,8 +34,8 @@ groups:
 
 jobs:
 - #@ check_code()
-- #@ test_on_docker_host("integration-tests")
-- #@ test_on_docker_host("e2e-tests")
+- #@ test_on_docker_host("integration-tests", site="site1")
+- #@ test_on_docker_host("e2e-tests", site="site1")
 
 - #@ build_edge_image()
 
@@ -302,4 +304,8 @@ resources:
     repository: #@ public_docker_registry() + "/" + data.values.gh_repository
 - #@ charts_repo_resource()
 - #@ charts_repo_bot_branch()
-- #@ docker_host_pool()
+- #@ docker_host_pool(site="site1")
+- #@ slack_resource()
+
+resource_types:
+- #@ slack_resource_type()
