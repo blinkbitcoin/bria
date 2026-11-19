@@ -380,9 +380,7 @@ async fn build_psbt_with_cpfp() -> anyhow::Result<()> {
     assert!(sats_per_vbyte_without_cpfp_fees >= sats_per_vbyte);
     assert!(sats_per_vbyte_without_cpfp_fees < sats_per_vbyte * 1.02);
 
-    // The batch fee guard compares a batch's fee against what this estimate
-    // implies, so it has to be an upper bound that stays close to the signed
-    // size.
+    // The batch fee guard needs an upper bound close to the signed size.
     let estimated_vbytes = estimated_vbytes.expect("estimated_vbytes");
     assert!(
         estimated_vbytes >= size as u64,
@@ -460,17 +458,10 @@ async fn build_psbt_with_min_change_output() -> anyhow::Result<()> {
 
 #[tokio::test]
 #[serial]
-// max_satisfaction_weight is deprecated in miniscript, but it is the measure the
-// builder sizes inputs with, so the expectation below has to use the same one.
+// Deprecated, but it's what the builder sizes inputs with.
 #[allow(deprecated)]
 async fn estimated_vbytes_keeps_each_inputs_own_weight() -> anyhow::Result<()> {
-    // A batch that consolidates a 2-of-3 multisig deprecated keychain into a
-    // single-sig current keychain. Every input ends up in one psbt, and the
-    // current keychain is visited last, so a size estimate that applied the
-    // last keychain's weight to all of them would understate the multisig
-    // inputs. FeesClient::check_batch_fee compares a batch's fee against
-    // `fee_rate * estimated_vbytes`, so understating the size reads a
-    // legitimate fee as inconsistent and refuses the batch.
+    // Multisig deprecated keychain + single-sig current one: each input must keep its own weight.
     let deprecated_keychain = helpers::random_multisig_bdk_wallet(2, 3)?;
     let current_keychain = helpers::random_bdk_wallet()?;
 
@@ -491,8 +482,7 @@ async fn estimated_vbytes_keeps_each_inputs_own_weight() -> anyhow::Result<()> {
     let current_addr = current_keychain.get_address(AddressIndex::New)?;
 
     let bitcoind = helpers::bitcoind_client().await?;
-    // Deliberately small: this test only cares about input weights, and modest
-    // amounts keep it fundable however far the regtest subsidy has halved.
+    // Small amounts keep this fundable however far the regtest subsidy has halved.
     helpers::fund_addr(&bitcoind, &deprecated_addr, 500_000)?;
     helpers::fund_addr(&bitcoind, &current_addr, 1_000_000)?;
     helpers::gen_blocks(&bitcoind, 10)?;

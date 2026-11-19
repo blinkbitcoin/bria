@@ -181,8 +181,7 @@ pub fn random_bdk_wallet() -> anyhow::Result<bdk::Wallet<MemoryDatabase>> {
     Ok(wallet)
 }
 
-/// A wallet whose inputs are markedly heavier to satisfy than `random_bdk_wallet`'s,
-/// for exercising batches that mix descriptors of different weights.
+/// `threshold`-of-`n_keys` multisig wallet: heavier inputs than `random_bdk_wallet`.
 pub fn random_multisig_bdk_wallet(
     threshold: usize,
     n_keys: usize,

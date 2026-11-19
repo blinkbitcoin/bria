@@ -45,8 +45,7 @@ pub struct FinishedPsbtBuild {
     pub fee_satoshis: Satoshis,
     pub tx_id: Option<bitcoin::Txid>,
     pub psbt: Option<psbt::PartiallySignedTransaction>,
-    /// Size the fee was computed over, including the satisfaction weight the
-    /// inputs will take once signed. `None` when no psbt was built.
+    /// Estimated signed vsize, for the batch fee guard.
     pub estimated_vbytes: Option<u64>,
 }
 
@@ -527,13 +526,7 @@ impl BdkWalletVisitor for PsbtBuilder<AcceptingCurrentKeychainState> {
                 self.result.fee_satoshis = fee_satoshis;
 
                 for input in psbt.unsigned_tx.input.iter() {
-                    // This psbt carries the foreign inputs accumulated from
-                    // deprecated keychains and from earlier wallets as well as
-                    // this keychain's own, and each of those was added with the
-                    // weight of the descriptor that will satisfy it. Only record
-                    // a weight for an outpoint seen here for the first time, or
-                    // the heavier descriptors get overwritten with this one and
-                    // the size estimate understates the transaction.
+                    // Insert-once: foreign inputs already carry their own descriptor's weight.
                     self.input_weights
                         .entry(input.previous_output)
                         .or_insert(keychain_satisfaction_weight);

@@ -176,15 +176,6 @@ async fn concurrent_requests_for_same_priority_coalesced() {
     assert_eq!(r1.unwrap().as_sat_per_vb(), r2.unwrap().as_sat_per_vb());
 }
 
-// ---------------------------------------------------------------------------
-// Fee-rate bounds (blinkbitcoin/blink-wip#1101).
-//
-// Implausible readings are rejected at the provider boundary so that the
-// fallback chain can do its job, and so that nothing unvetted is ever cached
-// or handed to bdk's FeeRate (which panics on a negative, infinite or
-// subnormal value).
-// ---------------------------------------------------------------------------
-
 const SANE_BLOCKSTREAM_BODY: &str = r#"{"1": 12.0, "3": 10.0, "6": 5.0}"#;
 
 fn mempool_fee_response_with_fastest(fastest_fee: u64) -> serde_json::Value {
@@ -276,8 +267,6 @@ async fn implausible_fee_rate_is_not_cached() {
     let first = client.fee_rate(TxPriority::NextBlock).await.unwrap();
     let second = client.fee_rate(TxPriority::NextBlock).await.unwrap();
 
-    // Only the value that survived validation is cached, so the rejected
-    // reading cannot come back for the rest of the cache_ttl.
     assert_eq!(first.as_sat_per_vb(), 12.0);
     assert_eq!(second.as_sat_per_vb(), 12.0);
 }
@@ -306,7 +295,7 @@ async fn blockstream_rejects_negative_fee_rate() {
 
 #[tokio::test]
 async fn blockstream_rejects_f32_overflowing_fee_rate() {
-    // 1e40 does not fit in f32: it used to saturate to +inf and panic.
+    // 1e40 overflows f32 to +inf.
     let server = MockServer::start().await;
     mount_blockstream(&server, r#"{"1": 1e40, "3": 10.0, "6": 5.0}"#).await;
 
@@ -348,7 +337,6 @@ async fn provider_boundary_is_the_hard_ceiling() {
 #[tokio::test]
 async fn fee_rate_above_configured_max_is_rejected() {
     let server = MockServer::start().await;
-    // plausible enough to pass the provider boundary, above the configured max
     mount_mempool(&server, 2_000).await;
 
     let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
@@ -402,8 +390,7 @@ async fn fee_rate_below_configured_min_is_raised() {
 #[tokio::test]
 async fn cached_estimate_is_still_bounded() {
     let server = MockServer::start().await;
-    // `expect(1)`: the second call is served from the cache, and the bounds are
-    // applied to it all the same.
+    // `expect(1)`: the second call is a cache hit, still bounded.
     mount_mempool(&server, 2_000).await;
 
     let client = FeesClient::new(test_fees_config(server.uri(), "http://unused".to_string()));
@@ -420,15 +407,13 @@ async fn cached_estimate_is_still_bounded() {
 #[tokio::test]
 async fn primary_above_configured_max_is_cross_checked_against_blockstream() {
     let server = MockServer::start().await;
-    // plausible at the provider boundary, above the configured max
     mount_mempool(&server, 2_000).await;
     mount_blockstream(&server, SANE_BLOCKSTREAM_BODY).await;
 
     let client = FeesClient::new(test_fees_config(server.uri(), server.uri()));
 
     let first = client.fee_rate(TxPriority::NextBlock).await.unwrap();
-    // `expect(1)` on mempool: the second call is served from the cache, which
-    // holds blockstream's reading rather than the refused one.
+    // `expect(1)`: the cache holds blockstream's reading, not the refused one.
     let second = client.fee_rate(TxPriority::NextBlock).await.unwrap();
 
     assert_eq!(first.as_sat_per_vb(), 12.0);
@@ -498,8 +483,6 @@ async fn accounting_uses_the_last_reading_once_stale_ttl_has_passed() {
     assert_eq!(fresh.as_sat_per_vb(), 20.0);
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    // Both providers are down and the reading is past stale_ttl: spending
-    // refuses it, accounting still uses it.
     assert!(client.fee_rate(TxPriority::NextBlock).await.is_err());
     let accounting = client
         .fee_rate_for_accounting(TxPriority::NextBlock)

@@ -71,7 +71,7 @@ pub(super) async fn execute<'a>(
             PayoutSelectionMode::Payout,
         )
         .await?;
-    // Defer rather than fail: a failed job retries in place on the ordered payout channel and blocks the account's other queues.
+    // Defer, don't fail: a failed job retries in place and blocks the account's ordered channel.
     let fee_rate = match fees_client.fee_rate(payout_queue.config.tx_priority).await {
         Ok(fee_rate) => fee_rate,
         Err(err @ FeeEstimationError::FeeRateAboveMaximum { .. }) => {
@@ -122,8 +122,6 @@ pub(super) async fn execute<'a>(
         );
         span.record("cpfp_fee_sats", tracing::field::display(cpfp_fee_sats));
 
-        // Last stop before the batch exists: the fee has to match the rate it
-        // was built at, whatever the builder arithmetic did.
         if let Some(vbytes) = estimated_vbytes {
             if let Err(err) = fees_client.check_batch_fee(
                 u64::from(fee_satoshis),

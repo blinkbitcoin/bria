@@ -7,37 +7,22 @@ use super::config::{
 use super::error::{BatchFeeError, FeeEstimationError};
 use crate::primitives::TxPriority;
 
-/// Tracing target for the bounds alerts, so that operators have a stable thing
-/// to alert on. `action` says what was done: "floor", "clamp" or "reject".
+/// Stable tracing target for fee-bound alerts.
 pub(super) const ALERT_TARGET: &str = "bria::fees::bounds";
 
-/// A batch fee at or below this is too small for the consistency check to say
-/// anything useful: bdk folds a change output that would be dust into the fee,
-/// which moves a small absolute fee by a large factor.
+/// Below this, bdk folding dust change into the fee makes the batch guard unreliable.
 const BATCH_FEE_GUARD_MIN_SATS: u64 = 25_000;
 
-/// Ceiling for any fee rate accepted from an external estimator, in sat/vB.
-///
-/// Deliberately not configurable: the most extreme organic fee events have
-/// peaked around 1_000 sat/vB, so a reading above this is a broken or
-/// compromised provider rather than a market condition. Operators narrow the
-/// working range with `app.fees.max_sat_per_vb`.
+/// Fixed ceiling for provider readings: above this the provider is broken, not the market.
 pub const HARD_MAX_SAT_PER_VB: f64 = 10_000.0;
 
-/// Turns a number taken from a provider response into a `FeeRate`.
-///
-/// This is the only place allowed to call `FeeRate::from_sat_per_vb` on
-/// external input: bdk asserts that the value is normal (or zero) and
-/// positive, so an unvetted response body can otherwise panic the calling
-/// task. Rejecting here - rather than substituting a value - lets the caller
-/// fall back to the other provider.
+/// The only conversion of provider input to `FeeRate`: bdk panics on non-normal values.
 pub fn checked_fee_rate(
     value: f64,
     provider: &'static str,
     priority: TxPriority,
 ) -> Result<FeeRate, FeeEstimationError> {
-    // `value as f32` underflows to zero for tiny values and saturates to
-    // infinity for huge ones, so the cast result is what has to be normal.
+    // The f32 cast can underflow to 0 or overflow to inf, so check the cast value.
     let sat_per_vb = value as f32;
     if !value.is_finite() || value <= 0.0 || value > HARD_MAX_SAT_PER_VB || !sat_per_vb.is_normal()
     {
@@ -57,17 +42,12 @@ pub fn checked_fee_rate(
     Ok(FeeRate::from_sat_per_vb(sat_per_vb))
 }
 
-/// A fee rate that has been through [`FeeBounds`].
-///
-/// The PSBT builder accepts nothing else, so no code path can reach
-/// `bdk::TxBuilder::fee_rate` with a rate that skipped the bounds - including
-/// future call sites that get a `FeeRate` from somewhere new.
+/// A fee rate that went through [`FeeBounds`]; the PSBT builder accepts nothing else.
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub struct BoundedFeeRate(FeeRate);
 
 impl BoundedFeeRate {
-    /// Escape hatch for tests that need to build a PSBT at a chosen rate.
-    /// Production code obtains these from `FeesClient`.
+    /// For tests only.
     #[doc(hidden)]
     pub fn unchecked(fee_rate: FeeRate) -> Self {
         Self(fee_rate)
@@ -82,9 +62,6 @@ impl std::ops::Deref for BoundedFeeRate {
     }
 }
 
-/// The configured working range for fee rates, applied to every rate handed to
-/// a consumer - including one served from the cache, so that a config change
-/// takes effect immediately and no cached entry can outlive its bounds.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct FeeBounds {
     min_sat_per_vb: f64,
@@ -105,8 +82,7 @@ impl FeeBounds {
             default_max_sat_per_vb(),
             "max_sat_per_vb",
         );
-        // `FeesConfig::validate` rejects this at startup; a library embedder
-        // can still build a config by hand, so don't trust it blindly.
+        // validate() rejects this at startup, but hand-built configs skip it.
         let (min, max) = if min > max {
             tracing::warn!(
                 min_sat_per_vb = min,
@@ -140,7 +116,6 @@ impl FeeBounds {
         }
     }
 
-    /// Whether a reading would be refused (or clamped) on a spending path.
     pub(super) fn exceeds_max(&self, fee_rate: FeeRate) -> bool {
         f64::from(fee_rate.as_sat_per_vb()) > self.max_sat_per_vb
     }
@@ -149,8 +124,7 @@ impl FeeBounds {
         self.max_sat_per_vb
     }
 
-    /// Bounds a rate that is about to be used to build a transaction. A reading
-    /// above the ceiling is refused by default: see [`OnMaxExceeded::Reject`].
+    /// Spending paths: refuse (or clamp) above max, floor below min.
     pub(super) fn enforce(
         &self,
         fee_rate: FeeRate,
@@ -176,8 +150,7 @@ impl FeeBounds {
         Ok(self.floored(fee_rate, observed, priority))
     }
 
-    /// Bounds a rate used for internal accounting (fee encumbrance), which must
-    /// never fail: wallet syncing depends on it and no funds move.
+    /// Accounting paths: clamp, never refuse.
     pub(super) fn clamp(&self, fee_rate: FeeRate, priority: TxPriority) -> BoundedFeeRate {
         let observed = f64::from(fee_rate.as_sat_per_vb());
         if observed > self.max_sat_per_vb {
@@ -187,10 +160,7 @@ impl FeeBounds {
         self.floored(fee_rate, observed, priority)
     }
 
-    /// Last check before a batch is created: the absolute fee has to be
-    /// consistent with the rate it was built at and the size it will be. The
-    /// bounds above constrain the rate; this constrains the arithmetic that
-    /// turned the rate into satoshis, which is where the money actually leaves.
+    /// Rejects a batch whose fee is out of line with its rate and size.
     pub(super) fn check_batch_fee(
         &self,
         fee_sats: u64,
@@ -198,8 +168,7 @@ impl FeeBounds {
         vbytes: u64,
         fee_rate: BoundedFeeRate,
     ) -> Result<(), BatchFeeError> {
-        // CPFP bump fees are paid on purpose and are not implied by this
-        // transaction's own size.
+        // CPFP bumps are deliberate and not implied by this tx's size.
         let own_fee_sats = fee_sats.saturating_sub(cpfp_fee_sats);
         if own_fee_sats <= BATCH_FEE_GUARD_MIN_SATS || vbytes == 0 {
             return Ok(());

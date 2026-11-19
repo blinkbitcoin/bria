@@ -20,37 +20,26 @@ pub struct FeesConfig {
     pub stale_ttl: std::time::Duration,
     #[serde(default = "default_enable_stale_on_error")]
     pub enable_stale_on_error: bool,
-    /// Fee rates below this are raised to it: a provider reporting less than
-    /// the node's min relay fee would otherwise build transactions that never
-    /// confirm.
+    /// Readings below this are raised to it.
     #[serde(default = "default_min_sat_per_vb")]
     pub min_sat_per_vb: f64,
-    /// Fee rates above this are refused (see `on_max_exceeded`) on the paths
-    /// that spend, and clamped on the paths that only estimate.
+    /// Readings above this are refused (see `on_max_exceeded`) when spending, clamped for accounting.
     #[serde(default = "default_max_sat_per_vb")]
     pub max_sat_per_vb: f64,
     #[serde(default)]
     pub on_max_exceeded: OnMaxExceeded,
-    /// How far a finished batch's absolute fee may exceed what its fee rate and
-    /// size imply before the batch is refused. Catches a mistake in the fee
-    /// arithmetic itself, which bounding the rate cannot.
+    /// Max ratio of a batch's fee to rate x size before the batch is refused.
     #[serde(default = "default_max_batch_fee_tolerance")]
     pub max_batch_fee_tolerance: f64,
 }
 
-/// What to do when an estimator reports more than `max_sat_per_vb` on a path
-/// that is about to spend.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnMaxExceeded {
-    /// Refuse to use the rate. The payout queue job ends without a batch and
-    /// the queue is processed again on its next tick, so no transaction is
-    /// built while the reading stands. This is the default: a batch built at a clamped-down rate is
-    /// signed and broadcast within seconds, cannot be cancelled afterwards, and
-    /// holds its inputs reserved until it confirms.
+    /// Skip batching until the next tick. Default, because a signed batch can't be cancelled.
     #[default]
     Reject,
-    /// Use `max_sat_per_vb` instead. Favours liveness over fee discipline.
+    /// Use `max_sat_per_vb` instead.
     Clamp,
 }
 
@@ -132,16 +121,10 @@ pub(super) fn default_min_sat_per_vb() -> f64 {
     1.0
 }
 
-/// Well above every sustained organic fee regime to date (the most extreme
-/// events peaked around 1_000 sat/vB and only briefly), so the default only
-/// fires on readings that are not credible market data. Operators who would
-/// rather hold payouts than pay a spike should lower this.
 pub(super) fn default_max_sat_per_vb() -> f64 {
     1_000.0
 }
 
-/// Generous on purpose: the batch guard is there to catch a fee that is wrong
-/// by an order of magnitude, not to second-guess the builder's arithmetic.
 pub(super) fn default_max_batch_fee_tolerance() -> f64 {
     3.0
 }

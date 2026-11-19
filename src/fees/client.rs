@@ -66,9 +66,7 @@ impl FeesClient {
         }
     }
 
-    /// Fee rate for building a transaction. Bounded by the configured range;
-    /// an estimate above `max_sat_per_vb` is refused rather than silently
-    /// turned into a transaction that pays it.
+    /// Fee rate for spending: refused above `max_sat_per_vb` unless configured to clamp.
     #[instrument(name = "fees.fee_rate", skip(self), fields(fee_rate), err)]
     pub async fn fee_rate(
         &self,
@@ -81,7 +79,7 @@ impl FeesClient {
         Ok(fee_rate)
     }
 
-    /// Fee rate for accounting (sync encumbrance): clamped, and falls back to the last reading of any age if all providers fail.
+    /// Fee rate for accounting: clamped, and falls back to the last reading if providers fail.
     #[instrument(
         name = "fees.fee_rate_for_accounting",
         skip(self),
@@ -115,8 +113,6 @@ impl FeesClient {
         Ok(fee_rate)
     }
 
-    /// Checks a finished batch's absolute fee against the rate it was built
-    /// at. See [`FeeBounds::check_batch_fee`].
     #[instrument(name = "fees.check_batch_fee", skip(self), err)]
     pub fn check_batch_fee(
         &self,
@@ -129,7 +125,7 @@ impl FeesClient {
             .check_batch_fee(fee_sats, cpfp_fee_sats, vbytes, fee_rate)
     }
 
-    /// The raw estimate from the cache or the providers, before any bounds.
+    /// Raw estimate from the cache or providers, unbounded.
     async fn estimated_fee_rate(
         &self,
         priority: TxPriority,
@@ -150,7 +146,7 @@ impl FeesClient {
         let (fetched_fee_rate, fetched_source) = match self.mempool_space.fee_rate(priority).await {
             Ok(fee_rate) if !self.bounds.exceeds_max(fee_rate) => (fee_rate, "mempool_space"),
             Ok(primary) => {
-                // Above max halts batching, so don't take one provider's word: use the lower of the two.
+                // Don't halt batching on one provider's word: use the lower reading.
                 tracing::warn!(
                     target: ALERT_TARGET,
                     ?priority,
