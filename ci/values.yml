@@ -26,3 +26,5 @@ staging_ssh_pub_key: ((staging-ssh.ssh_public_key))
 git_version_branch: version
 gh_org: blinkbitcoin
 gh_repository: bria
+slack_channel: bria-github
+slack_webhook_url: ((addons-slack.api_url))

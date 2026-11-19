@@ -7,4 +7,8 @@ set -eu
 
 pushd repo
 
-make check-code
+if command -v nix &> /dev/null; then
+  nix develop -c make check-code
+else
+  make check-code
+fi
