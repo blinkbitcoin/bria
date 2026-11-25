@@ -1,7 +1,6 @@
 mod config;
 pub mod error;
 
-use bdk::FeeRate;
 use tracing::instrument;
 
 use std::collections::HashMap;
@@ -656,7 +655,7 @@ impl App {
         queue_name: String,
         destination_wallet_name: String,
         sats: Satoshis,
-    ) -> Result<(Satoshis, FeeRate), ApplicationError> {
+    ) -> Result<(Satoshis, BoundedFeeRate), ApplicationError> {
         let destination_wallet = self
             .wallets
             .find_by_name(profile.account_id, destination_wallet_name)
@@ -683,7 +682,7 @@ impl App {
         queue_name: String,
         destination: String,
         sats: Satoshis,
-    ) -> Result<(Satoshis, FeeRate), ApplicationError> {
+    ) -> Result<(Satoshis, BoundedFeeRate), ApplicationError> {
         let wallet = self
             .wallets
             .find_by_name(profile.account_id, wallet_name)
@@ -740,7 +739,7 @@ impl App {
             wallet
                 .current_keychain_wallet(&self.pool)
                 .max_satisfaction_weight(),
-            fee_rate,
+            *fee_rate,
             n_payouts,
             payout_size,
             destination,
